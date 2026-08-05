@@ -1,0 +1,115 @@
+# RGB Screen TEST — Mario-style SSD1351 scroller
+
+Playable Mario-style side-scroller on a 128×128 SSD1351 OLED, built for an ATmega328P-class board (Arduino Nano / Uno). The design centers on **hardware scrolling + column compositing** so SPI bandwidth stays within what the AVR can sustain.
+
+## Hardware
+
+| Part | Wiring / notes |
+|------|----------------|
+| **SSD1351 OLED** | Hardware SPI: CS → 10, DC → 7, RST → 8 (SCLK → 13, MOSI → 11). Mount the module **rotated 90° counter-clockwise**. |
+| **NES Classic / clone** | I2C at `0x52`: VCC → 3.3V, GND → GND, SDA → A4, SCL → A5. Default clock `400000` (drop to `100000` if a long cable is flaky). |
+
+If the picture is mirrored or sky is on the wrong side, toggle `FLIP_Y`. If the world scrolls the wrong way relative to Mario, toggle `SCROLL_REVERSE`.
+
+Without a controller, inputs stay idle and a red strip in early columns signals “no pad.”
+
+## Why this architecture
+
+SPI on an ATmega328P is capped at `F_CPU/2` = 8 MHz. A pixel costs ~2 µs, so a full 128×128 frame is ~33 ms of bus time. Full-screen software redraws flicker and crawl.
+
+The SSD1351 **Set Display Start Line** register (`0xA1`) slides the panel over its own 128-row GRAM with wraparound for the cost of one command. That axis is the panel’s *vertical* one, so this renderer is transposed:
+
+- One GRAM row holds one **column** of the game world.
+- GRAM behaves as a **128-entry ring buffer** of world columns.
+- Panning one pixel means writing the newly visible column(s) and bumping the start line.
+
+The panel is square, so rotating the module 90° costs no screen area. Scrolling goes from ~16 000 pixels per frame to roughly one new world column plus a repaint of the ~15 columns Mario occupies.
+
+## Layers
+
+| Layer | Role |
+|-------|------|
+| **Input** | NES Classic (clone) over I2C |
+| **Sim** | Fixed-timestep physics + AABB solids |
+| **World** | One 320 px section in `PROGMEM`, tiled forever |
+| **Compositor** | Per-column sky / ground / objects / player → `colBuf[]` |
+| **Display** | Partial SPI writes + start-line pan |
+
+## Data model
+
+### World
+
+`ObjDef { x, y, type }` table (`WORLD[]` in flash). Object types: cloud, hill, block, question block, coin, pipe. Paint order = draw order (later entries cover earlier ones).
+
+There is **no parallax**: hardware scroll moves the whole GRAM at once, so the backdrop is part of the world and repeats with it.
+
+### Player
+
+Fixed-point Q8.8 (`playerXq` / `playerYq` and velocities). Camera tracks the player with a left margin (`CAMERA_MARGIN = 40`).
+
+### Column buffer
+
+`uint16_t colBuf[128]` — one world column from sky down to dirt. `clipTop` / `clipBot` limit compositing work when only Mario’s band needs a repaint.
+
+## Coordinate and orientation
+
+- Game Y maps into a GRAM column index via `gramCol()`. `FLIP_Y` mirrors that mapping.
+- `SCROLL_REVERSE` flips start-line math if scroll direction is wrong.
+- `setup()` remaps the panel so GRAM row N lands on panel row N and the start-line offset stays a straightforward add.
+
+## Game loop
+
+`loop()` runs a fixed simulation step of `STEP_MS` (16 ms), with a catch-up cap of 3 steps per pass:
+
+1. Read the pad → `updatePlayer` (move, jump edge, gravity, solids, floor, camera).
+2. If any step ran → `render()`.
+3. Once per second, print FPS and average pixels/frame over Serial (115200 baud).
+
+## Rendering pipeline
+
+`render()`:
+
+1. **Cold start / large jump** (`!panelValid` or `|camera delta| ≥ 128`): paint all 128 columns at full height.
+2. **Incremental**:
+   - If the camera moved, paint only newly visible columns.
+   - Union Mario’s previous and current AABB; repaint those columns in `[y0, y1]` (world first, then sprite, so old pixels clear in the same write).
+3. `setStartLine(cameraX)` — hardware pan.
+4. Cache `panelCam` and Mario’s column/row for the next dirty rect.
+
+`paintColumn` = set clip → `composeColumn` → `composeRunner` → `pushColumn` (`setAddrWindow` + `writePixels`).
+
+## Physics
+
+- Instant left/right velocity (no acceleration); jump on A/B edge while grounded.
+- Gravity with terminal fall velocity; solids resolved by minimum-overlap axis push (X and Y applied separately after each axis move).
+- Solid types: blocks, question blocks, pipes. Ground is a floor clamp at `GROUND_Y`.
+- Collision checks three adjacent 320 px world sections around the player.
+
+## Memory and performance
+
+- World data and Serial strings live in `PROGMEM` / `F()`.
+- One 256-byte column buffer — not a full framebuffer.
+- Precomputed `circTab[12][12]` for cloud / hill / coin discs.
+- Bus time is dominated by dirty pixels, not geometry math.
+
+## Sketch map
+
+| Section | Responsibility |
+|---------|----------------|
+| Header / pins / toggles | Display size, SPI pins, `FLIP_Y`, `SCROLL_REVERSE`, I2C clock |
+| Controller | Init + button decode for NES Classic over Wire |
+| World geometry | Object sizes, solid flags |
+| Physics | `resolveSolids`, `updatePlayer` |
+| Column compositor | Sky, ground, clouds, hills, blocks, pipes, coins |
+| Player sprite | Column slices of Mario (`composeRunner`) |
+| Output | `pushColumn`, `setStartLine`, `render` |
+| `setup` / `loop` | Init display remap, controller, fixed timestep, FPS report |
+
+## Building
+
+Open `RGB_Screen_TEST.ino` in the Arduino IDE (or use `arduino-cli`). Requires:
+
+- [Adafruit GFX Library](https://github.com/adafruit/Adafruit-GFX-Library)
+- [Adafruit SSD1351](https://github.com/adafruit/Adafruit-SSD1351-library)
+
+Select your board (e.g. Arduino Nano / Uno), upload, and open Serial Monitor at 115200 baud for FPS stats.
