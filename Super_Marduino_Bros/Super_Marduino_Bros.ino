@@ -50,10 +50,10 @@
 // ring backwards instead - see gramRow().
 #define SCROLL_REVERSE 1
 
-// Menu text sideways / upside-down? UI no longer uses setRotation; it
-// paints in the same GRAM mapping as gameplay so menus stay upright
-// on the mounted panel. Left here only as a note for older experiments.
-// #define UI_ROTATION 1
+// Menus use Adafruit's default font via setRotation so text is upright
+// on the panel (mounted 90 deg CCW). Gameplay uses applyGameRemap()
+// instead. If title text is sideways, try 3 here.
+#define UI_ROTATION 1
 
 // Drop to 100000 if a long controller cable gets flaky.
 #define I2C_CLOCK 400000
@@ -209,6 +209,30 @@ struct Enemy {
 
 Enemy enemies[MAX_ENEMIES];
 
+// Bricks removed at runtime. WORLD stays in PROGMEM; these entries
+// make collision and composeColumn skip a busted instance. The GRAM
+// erase itself is one-shot (see pendingErase) so we do not keep
+// painting "empty brick" placeholders every frame.
+#define MAX_BROKEN 12
+struct BrokenBrick {
+  int16_t section;
+  uint8_t index;
+};
+BrokenBrick brokenBricks[MAX_BROKEN];
+uint8_t brokenCount = 0;
+
+// Queued block rects to rewrite into GRAM once, world-first, so the
+// brick disappears and whatever was behind it (sky, hill, etc.) shows.
+#define MAX_ERASE 2
+struct EraseRect {
+  int32_t x;
+  int16_t y;
+  uint8_t w;
+  uint8_t h;
+};
+EraseRect pendingErase[MAX_ERASE];
+uint8_t pendingEraseCount = 0;
+
 // World x already scanned for spawns. It only ever moves right, so
 // walking back over old ground does not repopulate it.
 int32_t spawnFrontier = 0;
@@ -256,6 +280,12 @@ uint32_t pixelCount = 0;
 #define START_LIVES    3
 #define LIVES_HOLD_MS  2000
 
+// Death beat: freeze the fatal frame, squat, then hop and fall off-screen.
+// Kept short so the SPI dirty-rect path is the only cost after the hold.
+#define DEATH_HOLD_MS  450
+#define DEATH_SQUAT_MS 220
+#define DEATH_JUMP_Q   (-VEL_Q(145))
+
 enum : uint8_t {
   MODE_TITLE = 0,
   MODE_SELECT,
@@ -264,11 +294,24 @@ enum : uint8_t {
   MODE_DEAD
 };
 
+// Substates of MODE_PLAY. Pause/death stay on the game remap so we never
+// pay for a full-screen UI clear mid-level.
+enum : uint8_t {
+  PLAY_RUN = 0,
+  PLAY_PAUSE,
+  PLAY_DEATH_HOLD,   // frozen world - show the mistake
+  PLAY_DEATH_SQUAT,  // crouch beat before the hop
+  PLAY_DEATH_FALL    // no-collision jump, then fall through the map
+};
+
 uint8_t gameMode = MODE_TITLE;
+uint8_t playState = PLAY_RUN;
 uint8_t lives = START_LIVES;
 bool playAsLuigi = false;
 uint8_t selectIdx = 0;   // 0 = Mario, 1 = Luigi
 uint32_t modeMs = 0;
+uint32_t deathMs = 0;
+bool deathNeedsRender = false;
 bool uiDirty = true;
 bool menuArmed = false;  // ignore confirm until Start/A have been released
 
@@ -280,31 +323,7 @@ bool prevUp = false;
 bool prevDown = false;
 
 void enterMode(uint8_t mode);
-
-// Classic Adafruit 5x7 glyphs for ' '..'Z' (uppercase menus + digits).
-// Same layout as Adafruit_GFX glcdfont: 5 column bytes, bit0 = top.
-const uint8_t UI_FONT[] PROGMEM = {
-  0x00,0x00,0x00,0x00,0x00, 0x00,0x00,0x5F,0x00,0x00, 0x00,0x07,0x00,0x07,0x00,
-  0x14,0x7F,0x14,0x7F,0x14, 0x24,0x2A,0x7F,0x2A,0x12, 0x23,0x13,0x08,0x64,0x62,
-  0x36,0x49,0x56,0x20,0x50, 0x00,0x08,0x07,0x03,0x00, 0x00,0x1C,0x22,0x41,0x00,
-  0x00,0x41,0x22,0x1C,0x00, 0x2A,0x1C,0x7F,0x1C,0x2A, 0x08,0x08,0x3E,0x08,0x08,
-  0x00,0x80,0x70,0x30,0x00, 0x08,0x08,0x08,0x08,0x08, 0x00,0x00,0x60,0x60,0x00,
-  0x20,0x10,0x08,0x04,0x02, 0x3E,0x51,0x49,0x45,0x3E, 0x00,0x42,0x7F,0x40,0x00,
-  0x72,0x49,0x49,0x49,0x46, 0x21,0x41,0x49,0x4D,0x33, 0x18,0x14,0x12,0x7F,0x10,
-  0x27,0x45,0x45,0x45,0x39, 0x3C,0x4A,0x49,0x49,0x31, 0x41,0x21,0x11,0x09,0x07,
-  0x36,0x49,0x49,0x49,0x36, 0x46,0x49,0x49,0x29,0x1E, 0x00,0x00,0x14,0x00,0x00,
-  0x00,0x40,0x34,0x00,0x00, 0x00,0x08,0x14,0x22,0x41, 0x14,0x14,0x14,0x14,0x14,
-  0x00,0x41,0x22,0x14,0x08, 0x02,0x01,0x59,0x09,0x06, 0x3E,0x41,0x5D,0x59,0x4E,
-  0x7C,0x12,0x11,0x12,0x7C, 0x7F,0x49,0x49,0x49,0x36, 0x3E,0x41,0x41,0x41,0x22,
-  0x7F,0x41,0x41,0x41,0x3E, 0x7F,0x49,0x49,0x49,0x41, 0x7F,0x09,0x09,0x09,0x01,
-  0x3E,0x41,0x41,0x51,0x73, 0x7F,0x08,0x08,0x08,0x7F, 0x00,0x41,0x7F,0x41,0x00,
-  0x20,0x40,0x41,0x3F,0x01, 0x7F,0x08,0x14,0x22,0x41, 0x7F,0x40,0x40,0x40,0x40,
-  0x7F,0x02,0x1C,0x02,0x7F, 0x7F,0x04,0x08,0x10,0x7F, 0x3E,0x41,0x41,0x41,0x3E,
-  0x7F,0x09,0x09,0x09,0x06, 0x3E,0x41,0x51,0x21,0x5E, 0x7F,0x09,0x19,0x29,0x46,
-  0x26,0x49,0x49,0x49,0x32, 0x03,0x01,0x7F,0x01,0x03, 0x3F,0x40,0x40,0x40,0x3F,
-  0x1F,0x20,0x40,0x20,0x1F, 0x3F,0x40,0x38,0x40,0x3F, 0x63,0x14,0x08,0x14,0x63,
-  0x03,0x04,0x78,0x04,0x03, 0x61,0x59,0x49,0x4D,0x43
-};
+void endDeath();
 
 // --- Controller -----------------------------------------------------------
 
@@ -397,6 +416,43 @@ bool objSolid(uint8_t t) {
   return t == O_BLOCK || t == O_QBLOCK || t == O_PIPE;
 }
 
+bool isBroken(int32_t section, uint8_t index) {
+  for (uint8_t i = 0; i < brokenCount; i++) {
+    if (brokenBricks[i].section == (int16_t)section &&
+        brokenBricks[i].index == index) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Marks the brick gone and queues a one-shot GRAM rewrite of its rect.
+// composeColumn will skip it from then on, so scroll/Mario dirty paints
+// do not put the brick back.
+void bustBrick(int32_t section, uint8_t index) {
+  if (isBroken(section, index)) return;
+
+  if (brokenCount < MAX_BROKEN) {
+    brokenBricks[brokenCount].section = (int16_t)section;
+    brokenBricks[brokenCount].index = index;
+    brokenCount++;
+  } else {
+    // Ring: drop the oldest. Its GRAM hole stays until that column is
+    // dirtied again, at which point the brick can reappear - rare.
+    for (uint8_t i = 1; i < MAX_BROKEN; i++) brokenBricks[i - 1] = brokenBricks[i];
+    brokenBricks[MAX_BROKEN - 1].section = (int16_t)section;
+    brokenBricks[MAX_BROKEN - 1].index = index;
+  }
+
+  if (pendingEraseCount < MAX_ERASE) {
+    EraseRect& r = pendingErase[pendingEraseCount++];
+    r.x = section * SECTION_W + (int16_t)pgm_read_word(&WORLD[index].x);
+    r.y = pgm_read_byte(&WORLD[index].y);
+    r.w = objWidth(O_BLOCK);
+    r.h = objHeight(O_BLOCK);
+  }
+}
+
 // --- Physics --------------------------------------------------------------
 
 // Walks the solids in the three sections around a box. Returns true on
@@ -411,11 +467,13 @@ bool boxVsSolids(int32_t xq, int32_t yq, int32_t wq, int32_t hq, int32_t* liftOu
   int32_t lift = 0;
 
   for (int8_t s = 0; s < 3; s++) {
-    int32_t origin = (baseSection + s) * SECTION_W;
+    int32_t section = baseSection + s;
+    int32_t origin = section * SECTION_W;
 
     for (uint8_t i = 0; i < WORLD_COUNT; i++) {
       uint8_t type = pgm_read_byte(&WORLD[i].type);
       if (!objSolid(type)) continue;
+      if (type == O_BLOCK && isBroken(section, i)) continue;
 
       int32_t sx = origin + (int16_t)pgm_read_word(&WORLD[i].x);
       int16_t sw = objWidth(type);
@@ -441,17 +499,25 @@ bool boxVsSolids(int32_t xq, int32_t yq, int32_t wq, int32_t hq, int32_t* liftOu
   return hit;
 }
 
-void resolveSolids() {
+// canBust: only the post-Y-move pass may break bricks (head hit while
+// rising). Side scrapes from the X pass must not.
+void resolveSolids(bool canBust) {
   int16_t playerPx = (int16_t)(playerXq >> 8);
   int32_t baseSection = ((int32_t)playerPx / SECTION_W) - 1;
   if (playerPx < 0) baseSection--;
 
+  // Latch once so a wide head can bust every brick it hits this step,
+  // even after the first ceiling resolution zeroes velYq.
+  bool rising = canBust && velYq < 0;
+
   for (int8_t s = 0; s < 3; s++) {
-    int32_t origin = (baseSection + s) * SECTION_W;
+    int32_t section = baseSection + s;
+    int32_t origin = section * SECTION_W;
 
     for (uint8_t i = 0; i < WORLD_COUNT; i++) {
       uint8_t type = pgm_read_byte(&WORLD[i].type);
       if (!objSolid(type)) continue;
+      if (type == O_BLOCK && isBroken(section, i)) continue;
 
       int32_t sx = origin + (int16_t)pgm_read_word(&WORLD[i].x);
       int16_t sw = objWidth(type);
@@ -484,6 +550,7 @@ void resolveSolids() {
         onGround = true;
       } else {
         playerYq += overlapB;
+        if (type == O_BLOCK && rising) bustBrick(section, i);
         if (velYq < 0) velYq = 0;
       }
     }
@@ -515,11 +582,11 @@ void updatePlayer(const Buttons& btn) {
     playerXq = 0;
     velXq = 0;
   }
-  resolveSolids();
+  resolveSolids(false);
 
   playerYq += velYq;
   onGround = false;
-  resolveSolids();
+  resolveSolids(true);
 
   int32_t floorQ = (int32_t)(GROUND_Y - PLAYER_H) << 8;
   if (playerYq >= floorQ) {
@@ -562,19 +629,47 @@ void resetLevel() {
   facingRight = true;
   jumpWasHeld = false;
   cameraX = 0;
+  playState = PLAY_RUN;
+  deathNeedsRender = false;
 
   for (uint8_t i = 0; i < MAX_ENEMIES; i++) enemies[i].type = E_NONE;
   spawnFrontier = 0;
+  brokenCount = 0;
+  pendingEraseCount = 0;
   panelValid = false;
 }
 
+// Freeze the world on the fatal frame. Lives are spent after the fall
+// finishes so the player can read the mistake before the hop.
 void playerHit() {
+  if (playState != PLAY_RUN) return;
+  playState = PLAY_DEATH_HOLD;
+  deathMs = millis();
+  deathNeedsRender = true;
+  velXq = 0;
+  velYq = 0;
+}
+
+void endDeath() {
+  playState = PLAY_RUN;
+  deathNeedsRender = false;
   if (lives > 1) {
     lives--;
     enterMode(MODE_LIVES);
   } else {
     lives = 0;
     enterMode(MODE_DEAD);
+  }
+}
+
+// Death hop only: gravity, no solids, no ground, camera locked.
+// Terminal velocity is left uncapped so the fall clears the panel quickly.
+void updateDeathFall() {
+  velYq += GRAVITY_Q;
+  playerYq += velYq;
+
+  if ((playerYq >> 8) > SCREEN_HEIGHT) {
+    endDeath();
   }
 }
 
@@ -830,10 +925,13 @@ void composeColumn(int32_t worldX, uint16_t* b) {
     vspan(b, GROUND_Y + 15, GROUND_Y + 15, DARK_DIRT);
   }
 
-  int16_t wx = (int16_t)(worldX % SECTION_W);
+  int32_t section = worldX / SECTION_W;
+  int16_t wx = (int16_t)(worldX - section * SECTION_W);
 
   for (uint8_t i = 0; i < WORLD_COUNT; i++) {
     uint8_t type = pgm_read_byte(&WORLD[i].type);
+    if (type == O_BLOCK && isBroken(section, i)) continue;
+
     int16_t u = wx - (int16_t)pgm_read_word(&WORLD[i].x);
     if (u < 0 || u >= (int16_t)objWidth(type)) continue;
 
@@ -955,9 +1053,27 @@ void composeRunner(uint16_t* b, int32_t worldX) {
   int32_t left = playerXq >> 8;
   if (worldX < left || worldX >= left + PLAYER_W) return;
 
-  int16_t lu = (int16_t)(worldX - left);
   int16_t py = (int16_t)(playerYq >> 8);
+  // Off-screen during the death fall: skip draws (dirty rect still erases).
+  if (py >= SCREEN_HEIGHT || py + PLAYER_H <= 0) return;
+
+  int16_t lu = (int16_t)(worldX - left);
   uint16_t accent = playAsLuigi ? LUIGI_GRN : RED;
+
+  // Crouch beat: same bbox, body packed to the feet so the erase rect
+  // from the standing pose stays valid without an extra full-column paint.
+  if (playState == PLAY_DEATH_SQUAT) {
+    runnerPart(b, lu, py, 3, 8, 8, 3, accent);
+    runnerPart(b, lu, py, 1, 11, 12, 3, accent);
+    runnerPart(b, lu, py, 4, 14, 7, 3, SKIN);
+    runnerPart(b, lu, py, 9, 15, 2, 2, DARK_DIRT);
+    runnerPart(b, lu, py, 2, 17, 10, 3, BLUE);
+    runnerPart(b, lu, py, 0, 17, 3, 3, accent);
+    runnerPart(b, lu, py, 11, 17, 3, 3, accent);
+    runnerPart(b, lu, py, 1, 20, 5, 2, DARK_DIRT);
+    runnerPart(b, lu, py, 8, 20, 5, 2, DARK_DIRT);
+    return;
+  }
 
   runnerPart(b, lu, py, 3, 0, 8, 3, accent);
   runnerPart(b, lu, py, 1, 3, 12, 3, accent);
@@ -967,7 +1083,7 @@ void composeRunner(uint16_t* b, int32_t worldX) {
   runnerPart(b, lu, py, 0, 12, 3, 5, accent);
   runnerPart(b, lu, py, 11, 12, 3, 5, accent);
 
-  if (!onGround) {
+  if (!onGround || playState == PLAY_DEATH_FALL) {
     runnerPart(b, lu, py, 1, 18, 4, 4, DARK_DIRT);
     runnerPart(b, lu, py, 9, 18, 4, 4, DARK_DIRT);
   } else if (animFrame == 0) {
@@ -1084,6 +1200,7 @@ void render() {
     }
     tft.endWrite();
     panelValid = true;
+    pendingEraseCount = 0;
     syncEnemyRects();
   } else {
     tft.startWrite();
@@ -1113,6 +1230,21 @@ void render() {
       paintColumn(wx, y0, y1);
     }
 
+    // One-shot: rewrite busted brick columns without the brick so GRAM
+    // shows sky/backdrop. brokenBricks keeps composeColumn from putting
+    // them back on later dirties; no per-frame blank redraw.
+    for (uint8_t e = 0; e < pendingEraseCount; e++) {
+      EraseRect& r = pendingErase[e];
+      int16_t y1e = r.y + r.h - 1;
+      if (r.y < 0) continue;
+      if (y1e > SCREEN_HEIGHT - 1) y1e = SCREEN_HEIGHT - 1;
+      for (int32_t wx = r.x; wx < r.x + r.w; wx++) {
+        if (wx < cam || wx > cam + SCREEN_WIDTH - 1) continue;
+        paintColumn(wx, r.y, y1e);
+      }
+    }
+    pendingEraseCount = 0;
+
     paintEnemyRects(cam);
 
     tft.endWrite();
@@ -1127,10 +1259,18 @@ void render() {
 // --- Immediate-mode UI (Adafruit GFX default font) ------------------------
 
 void applyGameRemap() {
-  uint8_t remap = 0b01100100;  // match setup(): no bottom-up scan
+  // Gameplay owns the panel: rotation 0 + custom remap for column scroll.
+  tft.setRotation(0);
+  uint8_t remap = 0b01100100;  // no bottom-up scan
   tft.sendCommand(SSD1351_CMD_SETREMAP, &remap, 1);
   uint8_t zero = 0;
   tft.sendCommand(SSD1351_CMD_STARTLINE, &zero, 1);
+}
+
+void applyUiRemap() {
+  tft.setRotation(UI_ROTATION);
+  tft.setFont();  // classic 5x7 built into Adafruit_GFX
+  tft.setTextWrap(false);
 }
 
 void enterMode(uint8_t mode) {
@@ -1141,59 +1281,24 @@ void enterMode(uint8_t mode) {
   // clean release before Start/A can advance the menu again.
   menuArmed = false;
 
-  applyGameRemap();
   if (mode == MODE_PLAY) {
+    applyGameRemap();
     resetLevel();
     lastStep = millis();
+  } else {
+    applyUiRemap();
   }
 }
 
-// --- Immediate-mode UI (view-space, same mapping as gameplay) -------------
+// --- Immediate-mode UI (library coordinates after applyUiRemap) -----------
 
 void uiFill(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
   if (w <= 0 || h <= 0) return;
-  int16_t x1 = x + w - 1;
-  int16_t y1 = y + h - 1;
-  if (x < 0) x = 0;
-  if (y < 0) y = 0;
-  if (x1 > SCREEN_WIDTH - 1) x1 = SCREEN_WIDTH - 1;
-  if (y1 > SCREEN_HEIGHT - 1) y1 = SCREEN_HEIGHT - 1;
-  if (x > x1 || y > y1) return;
-
-  tft.startWrite();
-  for (int16_t vx = x; vx <= x1; vx++) {
-    clipTop = y;
-    clipBot = y1;
-    vspan(colBuf, y, y1, color);
-    pushColumn(vx, y, y1);
-  }
-  tft.endWrite();
+  tft.fillRect(x, y, w, h, color);
 }
 
 void uiClear() {
-  uiFill(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, BLACK);
-}
-
-void uiChar(int16_t x, int16_t y, char ch, uint16_t color, uint8_t size) {
-  if (ch >= 'a' && ch <= 'z') ch = (char)(ch - 32);
-  if (ch < ' ' || ch > 'Z') return;
-
-  uint16_t idx = (uint16_t)(ch - ' ') * 5;
-  for (uint8_t col = 0; col < 5; col++) {
-    uint8_t bits = pgm_read_byte(&UI_FONT[idx + col]);
-    for (uint8_t row = 0; row < 7; row++) {
-      if (!(bits & (1 << row))) continue;
-      int16_t px = x + (int16_t)col * size;
-      int16_t py = y + (int16_t)row * size;
-      int16_t py1 = py + size - 1;
-      for (uint8_t dx = 0; dx < size; dx++) {
-        clipTop = py;
-        clipBot = py1;
-        vspan(colBuf, py, py1, color);
-        pushColumn(px + dx, py, py1);
-      }
-    }
-  }
+  tft.fillScreen(BLACK);
 }
 
 uint8_t uiStrWidth(const char* s, uint8_t size) {
@@ -1203,24 +1308,18 @@ uint8_t uiStrWidth(const char* s, uint8_t size) {
 }
 
 void uiPrint(int16_t x, int16_t y, const char* s, uint16_t color, uint8_t size) {
-  tft.startWrite();
-  while (*s) {
-    uiChar(x, y, *s++, color, size);
-    x += 6 * size;
-  }
-  tft.endWrite();
+  tft.setTextSize(size);
+  tft.setTextColor(color);
+  tft.setCursor(x, y);
+  tft.print(s);
 }
 
 void uiPrint_P(int16_t x, int16_t y, const __FlashStringHelper* fs,
                uint16_t color, uint8_t size) {
-  const char* s = (const char*)fs;
-  tft.startWrite();
-  char ch;
-  while ((ch = (char)pgm_read_byte(s++)) != 0) {
-    uiChar(x, y, ch, color, size);
-    x += 6 * size;
-  }
-  tft.endWrite();
+  tft.setTextSize(size);
+  tft.setTextColor(color);
+  tft.setCursor(x, y);
+  tft.print(fs);
 }
 
 uint8_t uiStrWidth_P(const __FlashStringHelper* fs, uint8_t size) {
@@ -1422,28 +1521,101 @@ void loop() {
     return;
   }
 
-  if (now - lastStep > 250) lastStep = now;
-
-  uint8_t steps = 0;
-  while ((now - lastStep) >= STEP_MS && steps < 3) {
-    // Re-read each step so held directions stay live across catch-up.
-    updatePlayer(readController());
-    spawnEnemies();
-    updateEnemies();
-    collideEnemies();
-    lastStep += STEP_MS;
-    steps++;
-    if (gameMode != MODE_PLAY) break;
-  }
-
-  if (gameMode != MODE_PLAY) {
-    // Death mid-frame: leave GRAM as-is until the UI draw runs next pass.
+  // Start toggles pause only while alive. Death/pause keep lastStep pinned
+  // so catch-up steps do not burst when gameplay resumes.
+  if (playState == PLAY_PAUSE) {
+    lastStep = now;
+    if (eStart) playState = PLAY_RUN;
     return;
   }
 
-  if (steps) {
-    render();
-    frameCount++;
+  if (playState == PLAY_DEATH_HOLD) {
+    lastStep = now;
+    if (deathNeedsRender) {
+      render();
+      deathNeedsRender = false;
+      frameCount++;
+    }
+    if (now - deathMs >= DEATH_HOLD_MS) {
+      playState = PLAY_DEATH_SQUAT;
+      deathMs = now;
+      deathNeedsRender = true;
+    }
+    return;
+  }
+
+  if (playState == PLAY_DEATH_SQUAT) {
+    lastStep = now;
+    if (deathNeedsRender) {
+      render();
+      deathNeedsRender = false;
+      frameCount++;
+    }
+    if (now - deathMs >= DEATH_SQUAT_MS) {
+      playState = PLAY_DEATH_FALL;
+      onGround = false;
+      velXq = 0;
+      velYq = DEATH_JUMP_Q;
+      lastStep = now;
+    }
+    return;
+  }
+
+  if (playState == PLAY_DEATH_FALL) {
+    if (now - lastStep > 250) lastStep = now;
+
+    uint8_t steps = 0;
+    while ((now - lastStep) >= STEP_MS && steps < 3) {
+      updateDeathFall();
+      lastStep += STEP_MS;
+      steps++;
+      if (playState != PLAY_DEATH_FALL) break;
+    }
+
+    if (gameMode != MODE_PLAY) return;
+
+    if (steps) {
+      render();
+      frameCount++;
+    }
+  } else {
+    // PLAY_RUN
+    if (eStart) {
+      playState = PLAY_PAUSE;
+      lastStep = now;
+      return;
+    }
+
+    if (now - lastStep > 250) lastStep = now;
+
+    uint8_t steps = 0;
+    while ((now - lastStep) >= STEP_MS && steps < 3) {
+      // Re-read each step so held directions stay live across catch-up.
+      updatePlayer(readController());
+      spawnEnemies();
+      updateEnemies();
+      collideEnemies();
+      lastStep += STEP_MS;
+      steps++;
+      if (playState != PLAY_RUN) break;
+    }
+
+    if (gameMode != MODE_PLAY) return;
+
+    // Fatal hit: paint the frozen mistake frame before the hold timer.
+    if (playState == PLAY_DEATH_HOLD) {
+      if (deathNeedsRender) {
+        render();
+        deathNeedsRender = false;
+        frameCount++;
+      }
+      return;
+    }
+
+    if (steps) {
+      render();
+      frameCount++;
+    }
   }
 
   if (now - lastReport >= 1000) {
