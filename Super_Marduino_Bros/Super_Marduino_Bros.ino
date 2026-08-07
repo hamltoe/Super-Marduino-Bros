@@ -95,7 +95,8 @@ const uint16_t UI_DIM     = 0x8410;
 const int16_t GROUND_Y = 104;
 const int16_t SECTION_W = 320;
 const int16_t PLAYER_W = 14;
-const int16_t PLAYER_H = 22;
+const int16_t PLAYER_H_SMALL = 14;
+const int16_t PLAYER_H_BIG   = 22;
 const int16_t CAMERA_MARGIN = 40;
 
 const uint8_t STEP_MS      = 33;    // 16ms @ 60 fps, 33ms @ 30 fps
@@ -115,7 +116,7 @@ const int16_t JUMP_VEL_Q   = -VEL_Q(130);  // 130 px/s launch, ~40 px of air
 const int16_t MAX_FALL_Q   = VEL_Q(150);   // terminal velocity
 const int16_t STOMP_VEL_Q  = -VEL_Q(93);   // bounce off a stomped enemy
 const int32_t PLAYER_W_Q   = (int32_t)PLAYER_W << 8;
-const int32_t PLAYER_H_Q   = (int32_t)PLAYER_H << 8;
+const uint8_t INVULN_TICKS = (uint8_t)(2000 / STEP_MS);  // ~2 s after shrink
 
 #define O_CLOUD  0
 #define O_HILL   1
@@ -145,11 +146,21 @@ const ObjDef WORLD[] PROGMEM = {
   {102, 59, O_BLOCK},
   {125, 48, O_COIN},
   {166, (uint8_t)(GROUND_Y - 34), O_PIPE},
-  {230, 75, O_QBLOCK},
+  {230, 59, O_QBLOCK},
   {267, 48, O_BLOCK},
   {282, 48, O_BLOCK},
 };
 const uint8_t WORLD_COUNT = sizeof(WORLD) / sizeof(WORLD[0]);
+
+// Loot for each WORLD entry. Only O_QBLOCK slots are read on head-hit;
+// both question blocks hold a mushroom.
+#define Q_NONE     0
+#define Q_MUSHROOM 1
+const uint8_t WORLD_LOOT[] PROGMEM = {
+  Q_NONE, Q_NONE, Q_NONE, Q_NONE,
+  Q_NONE, Q_MUSHROOM, Q_NONE, Q_NONE,
+  Q_NONE, Q_MUSHROOM, Q_NONE, Q_NONE,
+};
 
 // --- Enemies --------------------------------------------------------------
 
@@ -209,6 +220,36 @@ struct Enemy {
 
 Enemy enemies[MAX_ENEMIES];
 
+// --- Power-ups (mushrooms from ? blocks) ----------------------------------
+
+#define IT_NONE     0
+#define IT_MUSHROOM 1
+
+#define IS_RISE 0  // emerging from a just-hit ? block
+#define IS_WALK 1
+#define IS_GONE 2  // stale pixels; freed after dirty-rect erase
+
+#define MAX_ITEMS 2
+
+const int16_t MUSH_W = 14;
+const int16_t MUSH_H = 14;
+const int16_t MUSH_SPEED_Q = VEL_Q(19);
+const int16_t MUSH_RISE_Q  = -VEL_Q(22);
+
+struct Item {
+  int32_t xq;
+  int32_t yq;
+  int32_t prevX;
+  int16_t prevY;
+  int16_t vxq;
+  int16_t vyq;
+  int16_t riseTargetY;  // pixel Y where the rise finishes (fully above block)
+  uint8_t type;
+  uint8_t state;
+};
+
+Item items[MAX_ITEMS];
+
 // Bricks removed at runtime. WORLD stays in PROGMEM; these entries
 // make collision and composeColumn skip a busted instance. The GRAM
 // erase itself is one-shot (see pendingErase) so we do not keep
@@ -220,6 +261,15 @@ struct BrokenBrick {
 };
 BrokenBrick brokenBricks[MAX_BROKEN];
 uint8_t brokenCount = 0;
+
+// ? blocks that have been hit: stay solid, paint as empty brick.
+#define MAX_USED_Q 8
+struct UsedQBlock {
+  int16_t section;
+  uint8_t index;
+};
+UsedQBlock usedQBlocks[MAX_USED_Q];
+uint8_t usedQCount = 0;
 
 // Queued block rects to rewrite into GRAM once, world-first, so the
 // brick disappears and whatever was behind it (sky, hill, etc.) shows.
@@ -244,8 +294,19 @@ struct Buttons {
   bool a, b, select, start;
 };
 
+bool bigMario = false;
+uint8_t invulnTicks = 0;
+
+inline int16_t playerH() {
+  return bigMario ? PLAYER_H_BIG : PLAYER_H_SMALL;
+}
+
+inline int32_t playerHQ() {
+  return (int32_t)playerH() << 8;
+}
+
 int32_t playerXq = (int32_t)40 << 8;
-int32_t playerYq = (int32_t)(GROUND_Y - PLAYER_H) << 8;
+int32_t playerYq = (int32_t)(GROUND_Y - PLAYER_H_SMALL) << 8;
 int16_t velXq = 0;
 int16_t velYq = 0;
 bool onGround = true;
@@ -426,6 +487,25 @@ bool isBroken(int32_t section, uint8_t index) {
   return false;
 }
 
+bool isUsedQ(int32_t section, uint8_t index) {
+  for (uint8_t i = 0; i < usedQCount; i++) {
+    if (usedQBlocks[i].section == (int16_t)section &&
+        usedQBlocks[i].index == index) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void queueBlockErase(int32_t section, uint8_t index, uint8_t type) {
+  if (pendingEraseCount >= MAX_ERASE) return;
+  EraseRect& r = pendingErase[pendingEraseCount++];
+  r.x = section * SECTION_W + (int16_t)pgm_read_word(&WORLD[index].x);
+  r.y = pgm_read_byte(&WORLD[index].y);
+  r.w = objWidth(type);
+  r.h = objHeight(type);
+}
+
 // Marks the brick gone and queues a one-shot GRAM rewrite of its rect.
 // composeColumn will skip it from then on, so scroll/Mario dirty paints
 // do not put the brick back.
@@ -444,13 +524,56 @@ void bustBrick(int32_t section, uint8_t index) {
     brokenBricks[MAX_BROKEN - 1].index = index;
   }
 
-  if (pendingEraseCount < MAX_ERASE) {
-    EraseRect& r = pendingErase[pendingEraseCount++];
-    r.x = section * SECTION_W + (int16_t)pgm_read_word(&WORLD[index].x);
-    r.y = pgm_read_byte(&WORLD[index].y);
-    r.w = objWidth(O_BLOCK);
-    r.h = objHeight(O_BLOCK);
+  queueBlockErase(section, index, O_BLOCK);
+}
+
+void spawnMushroom(int32_t worldX, int16_t blockY) {
+  for (uint8_t i = 0; i < MAX_ITEMS; i++) {
+    Item& it = items[i];
+    if (it.type != IT_NONE) continue;
+
+    it.type = IT_MUSHROOM;
+    it.state = IS_RISE;
+    it.xq = worldX << 8;
+    it.yq = (int32_t)blockY << 8;
+    it.riseTargetY = (int16_t)(blockY - MUSH_H);
+    it.vxq = MUSH_SPEED_Q;
+    it.vyq = 0;
+    it.prevX = worldX;
+    it.prevY = blockY;
+    return;
   }
+}
+
+// Empty the ? block (stays solid) and release its loot once.
+void hitQBlock(int32_t section, uint8_t index) {
+  if (isUsedQ(section, index)) return;
+
+  if (usedQCount < MAX_USED_Q) {
+    usedQBlocks[usedQCount].section = (int16_t)section;
+    usedQBlocks[usedQCount].index = index;
+    usedQCount++;
+  } else {
+    for (uint8_t i = 1; i < MAX_USED_Q; i++) usedQBlocks[i - 1] = usedQBlocks[i];
+    usedQBlocks[MAX_USED_Q - 1].section = (int16_t)section;
+    usedQBlocks[MAX_USED_Q - 1].index = index;
+  }
+
+  queueBlockErase(section, index, O_QBLOCK);
+
+  uint8_t loot = pgm_read_byte(&WORLD_LOOT[index]);
+  if (loot == Q_MUSHROOM) {
+    int32_t wx = section * SECTION_W + (int16_t)pgm_read_word(&WORLD[index].x);
+    int16_t by = pgm_read_byte(&WORLD[index].y);
+    spawnMushroom(wx, by);
+  }
+}
+
+void growMario() {
+  if (bigMario) return;
+  bigMario = true;
+  // Keep feet planted while the hitbox grows upward.
+  playerYq -= (int32_t)(PLAYER_H_BIG - PLAYER_H_SMALL) << 8;
 }
 
 // --- Physics --------------------------------------------------------------
@@ -529,13 +652,14 @@ void resolveSolids(bool canBust) {
       int32_t syq = (int32_t)pgm_read_byte(&WORLD[i].y) << 8;
       int32_t swq = (int32_t)sw << 8;
       int32_t shq = (int32_t)objHeight(type) << 8;
+      int32_t phq = playerHQ();
 
       if (playerXq >= sxq + swq || playerXq + PLAYER_W_Q <= sxq) continue;
-      if (playerYq >= syq + shq || playerYq + PLAYER_H_Q <= syq) continue;
+      if (playerYq >= syq + shq || playerYq + phq <= syq) continue;
 
       int32_t overlapL = (playerXq + PLAYER_W_Q) - sxq;
       int32_t overlapR = (sxq + swq) - playerXq;
-      int32_t overlapT = (playerYq + PLAYER_H_Q) - syq;
+      int32_t overlapT = (playerYq + phq) - syq;
       int32_t overlapB = (syq + shq) - playerYq;
 
       int32_t minX = (overlapL < overlapR) ? overlapL : overlapR;
@@ -550,7 +674,10 @@ void resolveSolids(bool canBust) {
         onGround = true;
       } else {
         playerYq += overlapB;
-        if (type == O_BLOCK && rising) bustBrick(section, i);
+        if (rising) {
+          if (type == O_BLOCK) bustBrick(section, i);
+          else if (type == O_QBLOCK) hitQBlock(section, i);
+        }
         if (velYq < 0) velYq = 0;
       }
     }
@@ -588,12 +715,14 @@ void updatePlayer(const Buttons& btn) {
   onGround = false;
   resolveSolids(true);
 
-  int32_t floorQ = (int32_t)(GROUND_Y - PLAYER_H) << 8;
+  int32_t floorQ = (int32_t)(GROUND_Y - playerH()) << 8;
   if (playerYq >= floorQ) {
     playerYq = floorQ;
     velYq = 0;
     onGround = true;
   }
+
+  if (invulnTicks) invulnTicks--;
 
   int16_t playerPx = (int16_t)(playerXq >> 8);
   cameraX = playerPx - CAMERA_MARGIN;
@@ -621,8 +750,10 @@ int16_t enemyMaxHeight(const Enemy& e) {
 }
 
 void resetLevel() {
+  bigMario = false;
+  invulnTicks = 0;
   playerXq = (int32_t)40 << 8;
-  playerYq = (int32_t)(GROUND_Y - PLAYER_H) << 8;
+  playerYq = (int32_t)(GROUND_Y - PLAYER_H_SMALL) << 8;
   velXq = 0;
   velYq = 0;
   onGround = true;
@@ -633,16 +764,23 @@ void resetLevel() {
   deathNeedsRender = false;
 
   for (uint8_t i = 0; i < MAX_ENEMIES; i++) enemies[i].type = E_NONE;
+  for (uint8_t i = 0; i < MAX_ITEMS; i++) items[i].type = IT_NONE;
   spawnFrontier = 0;
   brokenCount = 0;
+  usedQCount = 0;
   pendingEraseCount = 0;
   panelValid = false;
 }
 
-// Freeze the world on the fatal frame. Lives are spent after the fall
-// finishes so the player can read the mistake before the hop.
+// Big Mario shrinks with brief invulnerability; small Mario dies.
 void playerHit() {
   if (playState != PLAY_RUN) return;
+  if (bigMario) {
+    bigMario = false;
+    playerYq += (int32_t)(PLAYER_H_BIG - PLAYER_H_SMALL) << 8;
+    invulnTicks = INVULN_TICKS;
+    return;
+  }
   playState = PLAY_DEATH_HOLD;
   deathMs = millis();
   deathNeedsRender = true;
@@ -760,7 +898,51 @@ void updateEnemies() {
   }
 }
 
+// Contact kill from a kicked shell - Goombas flatten, everything else
+// drops out via ES_GONE (same lethality as touching the player).
+void defeatEnemy(Enemy& e) {
+  if (e.state == ES_GONE || e.state == ES_SQUASH) return;
+
+  if (e.type == E_GOOMBA) {
+    e.state = ES_SQUASH;
+    e.timer = SQUASH_TICKS;
+    e.vxq = 0;
+    e.yq += (int32_t)(GOOMBA_H - SQUASH_H) << 8;
+  } else {
+    e.state = ES_GONE;
+    e.vxq = 0;
+  }
+}
+
+// Sliding shells wipe out anything they overlap. O(n^2) over MAX_ENEMIES
+// (6) so the cost is a handful of box tests per step.
+void collideShellHits() {
+  for (uint8_t i = 0; i < MAX_ENEMIES; i++) {
+    Enemy& shell = enemies[i];
+    if (shell.type == E_NONE || shell.state != ES_SLIDE) continue;
+
+    int32_t swq = (int32_t)enemyWidth(shell) << 8;
+    int32_t shq = (int32_t)enemyHeight(shell) << 8;
+
+    for (uint8_t j = 0; j < MAX_ENEMIES; j++) {
+      if (i == j) continue;
+      Enemy& e = enemies[j];
+      if (e.type == E_NONE || e.state == ES_GONE || e.state == ES_SQUASH) continue;
+
+      int32_t ewq = (int32_t)enemyWidth(e) << 8;
+      int32_t ehq = (int32_t)enemyHeight(e) << 8;
+
+      if (shell.xq >= e.xq + ewq || shell.xq + swq <= e.xq) continue;
+      if (shell.yq >= e.yq + ehq || shell.yq + shq <= e.yq) continue;
+
+      defeatEnemy(e);
+    }
+  }
+}
+
 void collideEnemies() {
+  int32_t phq = playerHQ();
+
   for (uint8_t i = 0; i < MAX_ENEMIES; i++) {
     Enemy& e = enemies[i];
     if (e.type == E_NONE || e.state == ES_GONE || e.state == ES_SQUASH) continue;
@@ -769,14 +951,12 @@ void collideEnemies() {
     int32_t hq = (int32_t)enemyHeight(e) << 8;
 
     if (playerXq >= e.xq + wq || playerXq + PLAYER_W_Q <= e.xq) continue;
-    if (playerYq >= e.yq + hq || playerYq + PLAYER_H_Q <= e.yq) continue;
+    if (playerYq >= e.yq + hq || playerYq + phq <= e.yq) continue;
 
-    // Coming down onto the top half counts as a stomp; anything else
-    // is a hit, except for a shell sitting still, which gets kicked.
-    bool stomp = velYq > 0 && (playerYq + PLAYER_H_Q - e.yq) <= (hq >> 1);
-
-    if (stomp) {
-      playerYq = e.yq - PLAYER_H_Q;
+    // Airborne contact is always a stomp - forgiving when jumping on heads.
+    // Ground contact hurts, except a parked shell which gets kicked.
+    if (!onGround) {
+      playerYq = e.yq - phq;
       velYq = STOMP_VEL_Q;
       onGround = false;
 
@@ -801,10 +981,81 @@ void collideEnemies() {
       e.state = ES_SLIDE;
       e.vxq = fromLeft ? SHELL_SPEED_Q : -SHELL_SPEED_Q;
       playerXq += fromLeft ? -(int32_t)(3 << 8) : (int32_t)(3 << 8);
-    } else {
+    } else if (invulnTicks == 0) {
       playerHit();
       return;
     }
+  }
+}
+
+void updateItem(Item& it) {
+  if (it.state == IS_RISE) {
+    it.yq += MUSH_RISE_Q;
+    if ((int16_t)(it.yq >> 8) <= it.riseTargetY) {
+      it.yq = (int32_t)it.riseTargetY << 8;
+      it.state = IS_WALK;
+    }
+    return;
+  }
+
+  int32_t wq = (int32_t)MUSH_W << 8;
+  int32_t hq = (int32_t)MUSH_H << 8;
+
+  if (it.vxq) {
+    it.xq += it.vxq;
+    if (boxVsSolids(it.xq, it.yq, wq, hq, NULL)) {
+      it.xq -= it.vxq;
+      it.vxq = -it.vxq;
+    }
+  }
+
+  it.vyq += GRAVITY_Q;
+  if (it.vyq > MAX_FALL_Q) it.vyq = MAX_FALL_Q;
+  it.yq += it.vyq;
+
+  int32_t lift;
+  if (boxVsSolids(it.xq, it.yq, wq, hq, &lift)) {
+    it.yq -= lift;
+    if (it.vyq > 0) it.vyq = 0;
+  }
+
+  int32_t floorQ = (int32_t)(GROUND_Y - MUSH_H) << 8;
+  if (it.yq >= floorQ) {
+    it.yq = floorQ;
+    it.vyq = 0;
+  }
+}
+
+void updateItems() {
+  int32_t camLeft = cameraX;
+
+  for (uint8_t i = 0; i < MAX_ITEMS; i++) {
+    Item& it = items[i];
+    if (it.type == IT_NONE || it.state == IS_GONE) continue;
+
+    updateItem(it);
+
+    int32_t ix = it.xq >> 8;
+    if (ix + MUSH_W < camLeft - 8 || ix > camLeft + SCREEN_WIDTH + 96) {
+      it.state = IS_GONE;
+    }
+  }
+}
+
+void collideItems() {
+  int32_t phq = playerHQ();
+  int32_t mwq = (int32_t)MUSH_W << 8;
+  int32_t mhq = (int32_t)MUSH_H << 8;
+
+  for (uint8_t i = 0; i < MAX_ITEMS; i++) {
+    Item& it = items[i];
+    if (it.type == IT_NONE || it.state == IS_GONE) continue;
+
+    if (playerXq >= it.xq + mwq || playerXq + PLAYER_W_Q <= it.xq) continue;
+    if (playerYq >= it.yq + mhq || playerYq + phq <= it.yq) continue;
+
+    growMario();
+    it.state = IS_GONE;
   }
 }
 
@@ -942,7 +1193,7 @@ void composeColumn(int32_t worldX, uint16_t* b) {
       case O_HILL2:  colHill(b, u, HILL_LIGHT); break;
       case O_COIN:   colCoin(b, u, oy); break;
       case O_PIPE:   colPipe(b, u); break;
-      case O_QBLOCK: colBlock(b, u, oy, true); break;
+      case O_QBLOCK: colBlock(b, u, oy, !isUsedQ(section, i)); break;
       default:       colBlock(b, u, oy, false); break;
     }
   }
@@ -1049,16 +1300,75 @@ void runnerPart(uint16_t* b, int16_t lu, int16_t py, int16_t lx, int16_t ly,
   vspan(b, py + ly, py + ly + h - 1, color);
 }
 
+void colMushroom(uint16_t* b, int16_t u, int16_t top) {
+  spritePart(b, u, top, 2, 0, 10, 2, MUSH_W, false, RED);
+  spritePart(b, u, top, 0, 2, 14, 5, MUSH_W, false, RED);
+  spritePart(b, u, top, 3, 2, 2, 2, MUSH_W, false, WHITE);
+  spritePart(b, u, top, 9, 3, 2, 2, MUSH_W, false, WHITE);
+  spritePart(b, u, top, 4, 7, 6, 5, MUSH_W, false, SKIN);
+  spritePart(b, u, top, 3, 8, 2, 2, MUSH_W, false, DARK_DIRT);
+  spritePart(b, u, top, 9, 8, 2, 2, MUSH_W, false, DARK_DIRT);
+  spritePart(b, u, top, 2, 12, 4, 2, MUSH_W, false, SKIN);
+  spritePart(b, u, top, 8, 12, 4, 2, MUSH_W, false, SKIN);
+}
+
+void composeItems(uint16_t* b, int32_t worldX) {
+  for (uint8_t i = 0; i < MAX_ITEMS; i++) {
+    Item& it = items[i];
+    if (it.type == IT_NONE || it.state == IS_GONE) continue;
+
+    int32_t left = it.xq >> 8;
+    if (worldX < left || worldX >= left + MUSH_W) continue;
+
+    colMushroom(b, (int16_t)(worldX - left), (int16_t)(it.yq >> 8));
+  }
+}
+
 void composeRunner(uint16_t* b, int32_t worldX) {
   int32_t left = playerXq >> 8;
   if (worldX < left || worldX >= left + PLAYER_W) return;
 
   int16_t py = (int16_t)(playerYq >> 8);
+  int16_t ph = playerH();
   // Off-screen during the death fall: skip draws (dirty rect still erases).
-  if (py >= SCREEN_HEIGHT || py + PLAYER_H <= 0) return;
+  if (py >= SCREEN_HEIGHT || py + ph <= 0) return;
 
   int16_t lu = (int16_t)(worldX - left);
   uint16_t accent = playAsLuigi ? LUIGI_GRN : RED;
+
+  if (!bigMario) {
+    if (playState == PLAY_DEATH_SQUAT) {
+      runnerPart(b, lu, py, 3, 4, 8, 2, accent);
+      runnerPart(b, lu, py, 1, 6, 12, 2, accent);
+      runnerPart(b, lu, py, 4, 8, 7, 2, SKIN);
+      runnerPart(b, lu, py, 2, 10, 10, 2, BLUE);
+      runnerPart(b, lu, py, 0, 10, 3, 2, accent);
+      runnerPart(b, lu, py, 11, 10, 3, 2, accent);
+      runnerPart(b, lu, py, 1, 12, 5, 2, DARK_DIRT);
+      runnerPart(b, lu, py, 8, 12, 5, 2, DARK_DIRT);
+      return;
+    }
+
+    runnerPart(b, lu, py, 3, 0, 8, 2, accent);
+    runnerPart(b, lu, py, 1, 2, 12, 2, accent);
+    runnerPart(b, lu, py, 4, 4, 7, 4, SKIN);
+    runnerPart(b, lu, py, 9, 5, 2, 2, DARK_DIRT);
+    runnerPart(b, lu, py, 2, 8, 10, 3, BLUE);
+    runnerPart(b, lu, py, 0, 8, 3, 3, accent);
+    runnerPart(b, lu, py, 11, 8, 3, 3, accent);
+
+    if (!onGround || playState == PLAY_DEATH_FALL) {
+      runnerPart(b, lu, py, 1, 11, 4, 3, DARK_DIRT);
+      runnerPart(b, lu, py, 9, 11, 4, 3, DARK_DIRT);
+    } else if (animFrame == 0) {
+      runnerPart(b, lu, py, 2, 11, 4, 3, DARK_DIRT);
+      runnerPart(b, lu, py, 9, 11, 5, 2, DARK_DIRT);
+    } else {
+      runnerPart(b, lu, py, 0, 11, 5, 2, DARK_DIRT);
+      runnerPart(b, lu, py, 9, 11, 4, 3, DARK_DIRT);
+    }
+    return;
+  }
 
   // Crouch beat: same bbox, body packed to the feet so the erase rect
   // from the standing pose stays valid without an extra full-column paint.
@@ -1122,6 +1432,7 @@ void paintColumn(int32_t worldX, int16_t y0, int16_t y1) {
   clipBot = y1;
   composeColumn(worldX, colBuf);
   composeEnemies(colBuf, worldX);
+  composeItems(colBuf, worldX);
   composeRunner(colBuf, worldX);
   pushColumn(worldX, y0, y1);
 }
@@ -1187,6 +1498,46 @@ void syncEnemyRects() {
   }
 }
 
+void paintItemRects(int32_t cam) {
+  for (uint8_t i = 0; i < MAX_ITEMS; i++) {
+    Item& it = items[i];
+    if (it.type == IT_NONE) continue;
+
+    int32_t cx = it.xq >> 8;
+    int16_t cy = (int16_t)(it.yq >> 8);
+    bool gone = (it.state == IS_GONE);
+
+    int32_t x0 = gone ? it.prevX : min(it.prevX, cx);
+    int32_t x1 = (gone ? it.prevX : max(it.prevX, cx)) + MUSH_W - 1;
+    int16_t y0 = gone ? it.prevY : min(it.prevY, cy);
+    int16_t y1 = (gone ? it.prevY : max(it.prevY, cy)) + MUSH_H - 1;
+    if (y0 < 0) y0 = 0;
+    if (y1 > SCREEN_HEIGHT - 1) y1 = SCREEN_HEIGHT - 1;
+
+    for (int32_t wx = x0; wx <= x1; wx++) {
+      if (wx < cam || wx > cam + SCREEN_WIDTH - 1) continue;
+      paintColumn(wx, y0, y1);
+    }
+
+    it.prevX = cx;
+    it.prevY = cy;
+    if (gone) it.type = IT_NONE;
+  }
+}
+
+void syncItemRects() {
+  for (uint8_t i = 0; i < MAX_ITEMS; i++) {
+    Item& it = items[i];
+    if (it.type == IT_NONE) continue;
+    if (it.state == IS_GONE) {
+      it.type = IT_NONE;
+      continue;
+    }
+    it.prevX = it.xq >> 8;
+    it.prevY = (int16_t)(it.yq >> 8);
+  }
+}
+
 void render() {
   int32_t cam = cameraX;
   int32_t marioCol = playerXq >> 8;
@@ -1202,6 +1553,7 @@ void render() {
     panelValid = true;
     pendingEraseCount = 0;
     syncEnemyRects();
+    syncItemRects();
   } else {
     tft.startWrite();
 
@@ -1217,11 +1569,12 @@ void render() {
     }
 
     // Everything Mario covered or now covers, repainted world-first
-    // so his old pixels are erased in the same write.
+    // so his old pixels are erased in the same write. Use big height so
+    // grow/shrink dirty rects always cover the taller pose.
     int32_t c0 = min(marioColPrev, marioCol);
     int32_t c1 = max(marioColPrev, marioCol) + PLAYER_W - 1;
     int16_t y0 = min(marioRowPrev, marioRow);
-    int16_t y1 = max(marioRowPrev, marioRow) + PLAYER_H - 1;
+    int16_t y1 = max(marioRowPrev, marioRow) + PLAYER_H_BIG - 1;
     if (y0 < 0) y0 = 0;
     if (y1 > SCREEN_HEIGHT - 1) y1 = SCREEN_HEIGHT - 1;
 
@@ -1230,9 +1583,8 @@ void render() {
       paintColumn(wx, y0, y1);
     }
 
-    // One-shot: rewrite busted brick columns without the brick so GRAM
-    // shows sky/backdrop. brokenBricks keeps composeColumn from putting
-    // them back on later dirties; no per-frame blank redraw.
+    // One-shot: rewrite busted brick / used-? columns so GRAM matches
+    // composeColumn. brokenBricks / usedQBlocks keep later dirties correct.
     for (uint8_t e = 0; e < pendingEraseCount; e++) {
       EraseRect& r = pendingErase[e];
       int16_t y1e = r.y + r.h - 1;
@@ -1246,6 +1598,7 @@ void render() {
     pendingEraseCount = 0;
 
     paintEnemyRects(cam);
+    paintItemRects(cam);
 
     tft.endWrite();
   }
@@ -1594,7 +1947,10 @@ void loop() {
       updatePlayer(readController());
       spawnEnemies();
       updateEnemies();
+      updateItems();
+      collideShellHits();
       collideEnemies();
+      collideItems();
       lastStep += STEP_MS;
       steps++;
       if (playState != PLAY_RUN) break;
