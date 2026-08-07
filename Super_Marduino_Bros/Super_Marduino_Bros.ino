@@ -50,6 +50,11 @@
 // ring backwards instead - see gramRow().
 #define SCROLL_REVERSE 1
 
+// Menu text sideways / upside-down? UI no longer uses setRotation; it
+// paints in the same GRAM mapping as gameplay so menus stay upright
+// on the mounted panel. Left here only as a note for older experiments.
+// #define UI_ROTATION 1
+
 // Drop to 100000 if a long controller cable gets flaky.
 #define I2C_CLOCK 400000
 
@@ -84,6 +89,8 @@ const uint16_t KOOPA_SKIN = 0xFECF;
 const uint16_t SHELL_GRN  = 0x0404;
 const uint16_t SHELL_LT   = 0x770B;
 const uint16_t SHELL_RIM  = 0xFF14;
+const uint16_t LUIGI_GRN  = 0x07C0;
+const uint16_t UI_DIM     = 0x8410;
 
 const int16_t GROUND_Y = 104;
 const int16_t SECTION_W = 320;
@@ -243,6 +250,61 @@ uint32_t lastStep = 0;
 uint32_t lastReport = 0;
 uint16_t frameCount = 0;
 uint32_t pixelCount = 0;
+
+// --- Game flow ------------------------------------------------------------
+
+#define START_LIVES    3
+#define LIVES_HOLD_MS  2000
+
+enum : uint8_t {
+  MODE_TITLE = 0,
+  MODE_SELECT,
+  MODE_LIVES,
+  MODE_PLAY,
+  MODE_DEAD
+};
+
+uint8_t gameMode = MODE_TITLE;
+uint8_t lives = START_LIVES;
+bool playAsLuigi = false;
+uint8_t selectIdx = 0;   // 0 = Mario, 1 = Luigi
+uint32_t modeMs = 0;
+bool uiDirty = true;
+bool menuArmed = false;  // ignore confirm until Start/A have been released
+
+bool prevStart = false;
+bool prevA = false;
+bool prevLeft = false;
+bool prevRight = false;
+bool prevUp = false;
+bool prevDown = false;
+
+void enterMode(uint8_t mode);
+
+// Classic Adafruit 5x7 glyphs for ' '..'Z' (uppercase menus + digits).
+// Same layout as Adafruit_GFX glcdfont: 5 column bytes, bit0 = top.
+const uint8_t UI_FONT[] PROGMEM = {
+  0x00,0x00,0x00,0x00,0x00, 0x00,0x00,0x5F,0x00,0x00, 0x00,0x07,0x00,0x07,0x00,
+  0x14,0x7F,0x14,0x7F,0x14, 0x24,0x2A,0x7F,0x2A,0x12, 0x23,0x13,0x08,0x64,0x62,
+  0x36,0x49,0x56,0x20,0x50, 0x00,0x08,0x07,0x03,0x00, 0x00,0x1C,0x22,0x41,0x00,
+  0x00,0x41,0x22,0x1C,0x00, 0x2A,0x1C,0x7F,0x1C,0x2A, 0x08,0x08,0x3E,0x08,0x08,
+  0x00,0x80,0x70,0x30,0x00, 0x08,0x08,0x08,0x08,0x08, 0x00,0x00,0x60,0x60,0x00,
+  0x20,0x10,0x08,0x04,0x02, 0x3E,0x51,0x49,0x45,0x3E, 0x00,0x42,0x7F,0x40,0x00,
+  0x72,0x49,0x49,0x49,0x46, 0x21,0x41,0x49,0x4D,0x33, 0x18,0x14,0x12,0x7F,0x10,
+  0x27,0x45,0x45,0x45,0x39, 0x3C,0x4A,0x49,0x49,0x31, 0x41,0x21,0x11,0x09,0x07,
+  0x36,0x49,0x49,0x49,0x36, 0x46,0x49,0x49,0x29,0x1E, 0x00,0x00,0x14,0x00,0x00,
+  0x00,0x40,0x34,0x00,0x00, 0x00,0x08,0x14,0x22,0x41, 0x14,0x14,0x14,0x14,0x14,
+  0x00,0x41,0x22,0x14,0x08, 0x02,0x01,0x59,0x09,0x06, 0x3E,0x41,0x5D,0x59,0x4E,
+  0x7C,0x12,0x11,0x12,0x7C, 0x7F,0x49,0x49,0x49,0x36, 0x3E,0x41,0x41,0x41,0x22,
+  0x7F,0x41,0x41,0x41,0x3E, 0x7F,0x49,0x49,0x49,0x41, 0x7F,0x09,0x09,0x09,0x01,
+  0x3E,0x41,0x41,0x51,0x73, 0x7F,0x08,0x08,0x08,0x7F, 0x00,0x41,0x7F,0x41,0x00,
+  0x20,0x40,0x41,0x3F,0x01, 0x7F,0x08,0x14,0x22,0x41, 0x7F,0x40,0x40,0x40,0x40,
+  0x7F,0x02,0x1C,0x02,0x7F, 0x7F,0x04,0x08,0x10,0x7F, 0x3E,0x41,0x41,0x41,0x3E,
+  0x7F,0x09,0x09,0x09,0x06, 0x3E,0x41,0x51,0x21,0x5E, 0x7F,0x09,0x19,0x29,0x46,
+  0x26,0x49,0x49,0x49,0x32, 0x03,0x01,0x7F,0x01,0x03, 0x3F,0x40,0x40,0x40,0x3F,
+  0x1F,0x20,0x40,0x20,0x1F, 0x3F,0x40,0x38,0x40,0x3F, 0x63,0x14,0x08,0x14,0x63,
+  0x03,0x04,0x78,0x04,0x03, 0x61,0x59,0x49,0x4D,0x43
+};
 
 // --- Controller -----------------------------------------------------------
 
@@ -506,6 +568,16 @@ void resetLevel() {
   panelValid = false;
 }
 
+void playerHit() {
+  if (lives > 1) {
+    lives--;
+    enterMode(MODE_LIVES);
+  } else {
+    lives = 0;
+    enterMode(MODE_DEAD);
+  }
+}
+
 void spawnEnemies() {
   int32_t limit = cameraX + SCREEN_WIDTH + 8;
   if (limit <= spawnFrontier) return;
@@ -635,7 +707,7 @@ void collideEnemies() {
       e.vxq = fromLeft ? SHELL_SPEED_Q : -SHELL_SPEED_Q;
       playerXq += fromLeft ? -(int32_t)(3 << 8) : (int32_t)(3 << 8);
     } else {
-      resetLevel();
+      playerHit();
       return;
     }
   }
@@ -885,14 +957,15 @@ void composeRunner(uint16_t* b, int32_t worldX) {
 
   int16_t lu = (int16_t)(worldX - left);
   int16_t py = (int16_t)(playerYq >> 8);
+  uint16_t accent = playAsLuigi ? LUIGI_GRN : RED;
 
-  runnerPart(b, lu, py, 3, 0, 8, 3, RED);
-  runnerPart(b, lu, py, 1, 3, 12, 3, RED);
+  runnerPart(b, lu, py, 3, 0, 8, 3, accent);
+  runnerPart(b, lu, py, 1, 3, 12, 3, accent);
   runnerPart(b, lu, py, 4, 6, 7, 5, SKIN);
   runnerPart(b, lu, py, 9, 7, 2, 2, DARK_DIRT);
   runnerPart(b, lu, py, 2, 11, 10, 7, BLUE);
-  runnerPart(b, lu, py, 0, 12, 3, 5, RED);
-  runnerPart(b, lu, py, 11, 12, 3, 5, RED);
+  runnerPart(b, lu, py, 0, 12, 3, 5, accent);
+  runnerPart(b, lu, py, 11, 12, 3, 5, accent);
 
   if (!onGround) {
     runnerPart(b, lu, py, 1, 18, 4, 4, DARK_DIRT);
@@ -1051,6 +1124,242 @@ void render() {
   marioRowPrev = marioRow;
 }
 
+// --- Immediate-mode UI (Adafruit GFX default font) ------------------------
+
+void applyGameRemap() {
+  uint8_t remap = 0b01100100;  // match setup(): no bottom-up scan
+  tft.sendCommand(SSD1351_CMD_SETREMAP, &remap, 1);
+  uint8_t zero = 0;
+  tft.sendCommand(SSD1351_CMD_STARTLINE, &zero, 1);
+}
+
+void enterMode(uint8_t mode) {
+  gameMode = mode;
+  modeMs = millis();
+  uiDirty = true;
+  // Pad lines often read "pressed" on boot / mode change; wait for a
+  // clean release before Start/A can advance the menu again.
+  menuArmed = false;
+
+  applyGameRemap();
+  if (mode == MODE_PLAY) {
+    resetLevel();
+    lastStep = millis();
+  }
+}
+
+// --- Immediate-mode UI (view-space, same mapping as gameplay) -------------
+
+void uiFill(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
+  if (w <= 0 || h <= 0) return;
+  int16_t x1 = x + w - 1;
+  int16_t y1 = y + h - 1;
+  if (x < 0) x = 0;
+  if (y < 0) y = 0;
+  if (x1 > SCREEN_WIDTH - 1) x1 = SCREEN_WIDTH - 1;
+  if (y1 > SCREEN_HEIGHT - 1) y1 = SCREEN_HEIGHT - 1;
+  if (x > x1 || y > y1) return;
+
+  tft.startWrite();
+  for (int16_t vx = x; vx <= x1; vx++) {
+    clipTop = y;
+    clipBot = y1;
+    vspan(colBuf, y, y1, color);
+    pushColumn(vx, y, y1);
+  }
+  tft.endWrite();
+}
+
+void uiClear() {
+  uiFill(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, BLACK);
+}
+
+void uiChar(int16_t x, int16_t y, char ch, uint16_t color, uint8_t size) {
+  if (ch >= 'a' && ch <= 'z') ch = (char)(ch - 32);
+  if (ch < ' ' || ch > 'Z') return;
+
+  uint16_t idx = (uint16_t)(ch - ' ') * 5;
+  for (uint8_t col = 0; col < 5; col++) {
+    uint8_t bits = pgm_read_byte(&UI_FONT[idx + col]);
+    for (uint8_t row = 0; row < 7; row++) {
+      if (!(bits & (1 << row))) continue;
+      int16_t px = x + (int16_t)col * size;
+      int16_t py = y + (int16_t)row * size;
+      int16_t py1 = py + size - 1;
+      for (uint8_t dx = 0; dx < size; dx++) {
+        clipTop = py;
+        clipBot = py1;
+        vspan(colBuf, py, py1, color);
+        pushColumn(px + dx, py, py1);
+      }
+    }
+  }
+}
+
+uint8_t uiStrWidth(const char* s, uint8_t size) {
+  uint8_t n = 0;
+  while (s[n]) n++;
+  return (uint8_t)(n * 6 * size);
+}
+
+void uiPrint(int16_t x, int16_t y, const char* s, uint16_t color, uint8_t size) {
+  tft.startWrite();
+  while (*s) {
+    uiChar(x, y, *s++, color, size);
+    x += 6 * size;
+  }
+  tft.endWrite();
+}
+
+void uiPrint_P(int16_t x, int16_t y, const __FlashStringHelper* fs,
+               uint16_t color, uint8_t size) {
+  const char* s = (const char*)fs;
+  tft.startWrite();
+  char ch;
+  while ((ch = (char)pgm_read_byte(s++)) != 0) {
+    uiChar(x, y, ch, color, size);
+    x += 6 * size;
+  }
+  tft.endWrite();
+}
+
+uint8_t uiStrWidth_P(const __FlashStringHelper* fs, uint8_t size) {
+  const char* s = (const char*)fs;
+  uint8_t n = 0;
+  while (pgm_read_byte(s++)) n++;
+  return (uint8_t)(n * 6 * size);
+}
+
+void uiCenter(int16_t y, const __FlashStringHelper* s, uint16_t color, uint8_t size) {
+  int16_t x = (SCREEN_WIDTH - (int16_t)uiStrWidth_P(s, size)) / 2;
+  uiPrint_P(x, y, s, color, size);
+}
+
+void uiCenterCStr(int16_t y, const char* s, uint16_t color, uint8_t size) {
+  int16_t x = (SCREEN_WIDTH - (int16_t)uiStrWidth(s, size)) / 2;
+  uiPrint(x, y, s, color, size);
+}
+
+void uiMenuCursor(int16_t x, int16_t y, bool on) {
+  if (on) uiPrint_P(x, y, F(">"), YELLOW, 1);
+}
+
+void uiRunnerSwatch(int16_t x, int16_t y, bool luigi) {
+  uint16_t accent = luigi ? LUIGI_GRN : RED;
+  uiFill(x + 3, y, 8, 3, accent);
+  uiFill(x + 1, y + 3, 12, 3, accent);
+  uiFill(x + 4, y + 6, 7, 5, SKIN);
+  uiFill(x + 2, y + 11, 10, 7, BLUE);
+  uiFill(x, y + 12, 3, 5, accent);
+  uiFill(x + 11, y + 12, 3, 5, accent);
+  uiFill(x + 2, y + 18, 4, 4, DARK_DIRT);
+  uiFill(x + 9, y + 18, 4, 4, DARK_DIRT);
+}
+
+void uiMenuRow(int16_t y, const __FlashStringHelper* label, uint16_t color,
+               bool selected, bool luigiSwatch) {
+  uiMenuCursor(8, y + 8, selected);
+  uiRunnerSwatch(22, y, luigiSwatch);
+  uiPrint_P(44, y + 8, label, selected ? color : UI_DIM, 1);
+  if (selected) uiFill(44, y + 18, 36, 1, color);
+}
+
+void drawTitle() {
+  uiClear();
+  uiCenter(18, F("SUPER"), WHITE, 2);
+  uiCenter(38, F("MARDUINO"), RED, 2);
+  uiCenter(58, F("BROS"), WHITE, 2);
+  uiMenuCursor(22, 88, true);
+  uiPrint_P(34, 88, F("PRESS START"), YELLOW, 1);
+  if (!controllerOk) uiCenter(108, F("NO PAD"), RED, 1);
+}
+
+void drawSelect() {
+  uiClear();
+  uiCenter(8, F("SELECT PLAYER"), WHITE, 1);
+  uiMenuRow(36, F("MARIO"), RED, selectIdx == 0, false);
+  uiMenuRow(72, F("LUIGI"), LUIGI_GRN, selectIdx == 1, true);
+  uiCenter(112, F("START TO CONFIRM"), UI_DIM, 1);
+}
+
+void drawLives() {
+  uiClear();
+  if (playAsLuigi) uiCenter(36, F("LUIGI"), LUIGI_GRN, 2);
+  else             uiCenter(36, F("MARIO"), RED, 2);
+
+  char line[8];
+  line[0] = 'x';
+  line[1] = ' ';
+  line[2] = (char)('0' + lives);
+  line[3] = '\0';
+  uiCenterCStr(68, line, WHITE, 2);
+}
+
+void drawDead() {
+  uiClear();
+  uiCenter(40, F("GAME OVER"), RED, 2);
+  uiMenuCursor(22, 78, true);
+  uiPrint_P(34, 78, F("PRESS START"), YELLOW, 1);
+}
+
+void paintUiIfDirty(void (*draw)()) {
+  if (!uiDirty) return;
+  draw();
+  uiDirty = false;
+}
+
+bool menuConfirm(bool eStart, bool eA, bool startDown, bool aDown) {
+  if (!menuArmed) {
+    if (!startDown && !aDown) menuArmed = true;
+    return false;
+  }
+  return eStart || eA;
+}
+
+void updateTitle(bool eStart, bool eA, bool startDown, bool aDown) {
+  paintUiIfDirty(drawTitle);
+  if (menuConfirm(eStart, eA, startDown, aDown)) {
+    selectIdx = playAsLuigi ? 1 : 0;
+    enterMode(MODE_SELECT);
+  }
+}
+
+void updateSelect(bool eStart, bool eA, bool eLeft, bool eRight,
+                  bool eUp, bool eDown, bool startDown, bool aDown) {
+  if (menuArmed) {
+    if (eLeft || eUp) {
+      selectIdx = 0;
+      uiDirty = true;
+    } else if (eRight || eDown) {
+      selectIdx = 1;
+      uiDirty = true;
+    }
+  }
+
+  paintUiIfDirty(drawSelect);
+
+  if (menuConfirm(eStart, eA, startDown, aDown)) {
+    playAsLuigi = (selectIdx == 1);
+    lives = START_LIVES;
+    enterMode(MODE_LIVES);
+  }
+}
+
+void updateLives(bool eStart, bool startDown, bool aDown) {
+  paintUiIfDirty(drawLives);
+  bool timedOut = (millis() - modeMs) >= LIVES_HOLD_MS;
+  if (timedOut || menuConfirm(eStart, false, startDown, aDown)) {
+    enterMode(MODE_PLAY);
+  }
+}
+
+void updateDead(bool eStart, bool startDown, bool aDown) {
+  paintUiIfDirty(drawDead);
+  if (menuConfirm(eStart, false, startDown, aDown)) {
+    enterMode(MODE_TITLE);
+  }
+}
+
 void setup(void) {
   Serial.begin(115200);
   buildCircTab();
@@ -1060,10 +1369,7 @@ void setup(void) {
   // Same remap Adafruit uses for rotation 0, minus the bottom-up scan
   // bit, so GRAM row N lands on panel row N and the start line offset
   // stays a straightforward add.
-  uint8_t remap = 0b01100100;  // 64K colour, COM split, CBA order, horiz. increment
-  tft.sendCommand(SSD1351_CMD_SETREMAP, &remap, 1);
-  uint8_t zero = 0;
-  tft.sendCommand(SSD1351_CMD_STARTLINE, &zero, 1);
+  applyGameRemap();
 
   tft.fillScreen(BLACK);
 
@@ -1074,21 +1380,65 @@ void setup(void) {
 
   lastStep = millis();
   lastReport = lastStep;
+
+  enterMode(MODE_TITLE);
 }
 
 void loop() {
   uint32_t now = millis();
+  Buttons btn = readController();
+
+  bool eStart = btn.start && !prevStart;
+  bool eA     = btn.a && !prevA;
+  bool eLeft  = btn.left && !prevLeft;
+  bool eRight = btn.right && !prevRight;
+  bool eUp    = btn.up && !prevUp;
+  bool eDown  = btn.down && !prevDown;
+
+  prevStart = btn.start;
+  prevA     = btn.a;
+  prevLeft  = btn.left;
+  prevRight = btn.right;
+  prevUp    = btn.up;
+  prevDown  = btn.down;
+
+  if (gameMode != MODE_PLAY) {
+    switch (gameMode) {
+      case MODE_TITLE:
+        updateTitle(eStart, eA, btn.start, btn.a);
+        break;
+      case MODE_SELECT:
+        updateSelect(eStart, eA, eLeft, eRight, eUp, eDown, btn.start, btn.a);
+        break;
+      case MODE_LIVES:
+        updateLives(eStart, btn.start, btn.a);
+        break;
+      case MODE_DEAD:
+        updateDead(eStart, btn.start, btn.a);
+        break;
+      default:
+        break;
+    }
+    return;
+  }
 
   if (now - lastStep > 250) lastStep = now;
 
   uint8_t steps = 0;
   while ((now - lastStep) >= STEP_MS && steps < 3) {
+    // Re-read each step so held directions stay live across catch-up.
     updatePlayer(readController());
     spawnEnemies();
     updateEnemies();
     collideEnemies();
     lastStep += STEP_MS;
     steps++;
+    if (gameMode != MODE_PLAY) break;
+  }
+
+  if (gameMode != MODE_PLAY) {
+    // Death mid-frame: leave GRAM as-is until the UI draw runs next pass.
+    return;
   }
 
   if (steps) {
@@ -1101,8 +1451,8 @@ void loop() {
     Serial.print(F(" fps, "));
     Serial.print(frameCount ? (pixelCount / frameCount) : 0);
     Serial.println(F(" px/frame"));
+    lastReport = now;
     frameCount = 0;
     pixelCount = 0;
-    lastReport = now;
   }
 }
