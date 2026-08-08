@@ -58,6 +58,12 @@
 // Drop to 100000 if a long controller cable gets flaky.
 #define I2C_CLOCK 400000
 
+// Serial FPS / boot logs. Off by default — HardwareSerial alone is ~1 KB
+// and the Nano is flash-bound with score/coins/run-jump in.
+#ifndef DEBUG_SERIAL
+#define DEBUG_SERIAL 0
+#endif
+
 #define BLACK   0x0000
 #define BLUE    0x001F
 #define RED     0xF800
@@ -110,9 +116,9 @@ const uint8_t STEP_MS      = 33;    // 16ms @ 60 fps, 33ms @ 30 fps
 #define ACC_Q(px_s2) ((int16_t)(((int32_t)(px_s2) * 256 * STEP_MS * STEP_MS \
                                  + 500000L) / 1000000L))
 
-const int16_t MOVE_SPEED_Q = VEL_Q(50);    // 50 px/s run
+const int16_t MOVE_SPEED_Q = VEL_Q(50);    // 50 px/s walk; B run is 1.5x
 const int16_t GRAVITY_Q    = ACC_Q(214);   // 214 px/s^2
-const int16_t JUMP_VEL_Q   = -VEL_Q(130);  // 130 px/s launch, ~40 px of air
+const int16_t JUMP_VEL_Q   = -VEL_Q(130);  // walk jump ~40 px; B adds VEL_Q(30)
 const int16_t MAX_FALL_Q   = VEL_Q(150);   // terminal velocity
 const int16_t STOMP_VEL_Q  = -VEL_Q(93);   // bounce off a stomped enemy
 const int32_t PLAYER_W_Q   = (int32_t)PLAYER_W << 8;
@@ -145,8 +151,11 @@ const ObjDef WORLD[] PROGMEM = {
   { 87, 59, O_QBLOCK},
   {102, 59, O_BLOCK},
   {125, 48, O_COIN},
+  {145, 70, O_COIN},
   {166, (uint8_t)(GROUND_Y - 34), O_PIPE},
+  {200, 48, O_COIN},
   {230, 59, O_QBLOCK},
+  {250, 30, O_COIN},
   {267, 48, O_BLOCK},
   {282, 48, O_BLOCK},
 };
@@ -159,7 +168,8 @@ const uint8_t WORLD_COUNT = sizeof(WORLD) / sizeof(WORLD[0]);
 const uint8_t WORLD_LOOT[] PROGMEM = {
   Q_NONE, Q_NONE, Q_NONE, Q_NONE,
   Q_NONE, Q_MUSHROOM, Q_NONE, Q_NONE,
-  Q_NONE, Q_MUSHROOM, Q_NONE, Q_NONE,
+  Q_NONE, Q_NONE, Q_NONE, Q_MUSHROOM,
+  Q_NONE, Q_NONE, Q_NONE,
 };
 
 // --- Enemies --------------------------------------------------------------
@@ -250,10 +260,9 @@ struct Item {
 
 Item items[MAX_ITEMS];
 
-// Bricks removed at runtime. WORLD stays in PROGMEM; these entries
-// make collision and composeColumn skip a busted instance. The GRAM
-// erase itself is one-shot (see pendingErase) so we do not keep
-// painting "empty brick" placeholders every frame.
+// World objects removed at runtime (bust bricks, collected coins).
+// WORLD stays in PROGMEM; these entries make collision/compose skip
+// a gone instance. The GRAM erase is one-shot (see pendingErase).
 #define MAX_BROKEN 12
 struct BrokenBrick {
   int16_t section;
@@ -261,6 +270,23 @@ struct BrokenBrick {
 };
 BrokenBrick brokenBricks[MAX_BROKEN];
 uint8_t brokenCount = 0;
+
+// Score / timer HUD: 3x5 font drawn at 2x (6x10) in the sky strip.
+#define COIN_POINTS   100
+#define START_TIME    300
+#define TIME_TICKS    (1000 / STEP_MS)  // ~1 s per countdown step
+#define HUD_DIGIT_W   7                 // 6 px glyph + 1 gap
+#define HUD_Y0        1
+#define HUD_Y1        10
+#define SCORE_HUD_X   2
+#define SCORE_HUD_W   (5 * HUD_DIGIT_W)
+#define TIME_HUD_W    (3 * HUD_DIGIT_W)
+#define TIME_HUD_X    (SCREEN_WIDTH - 2 - TIME_HUD_W)
+uint16_t score = 0;
+uint16_t timeLeft = START_TIME;
+uint8_t scoreDigits[5];
+uint8_t timeDigits[3];
+uint8_t timeTick = 0;
 
 // ? blocks that have been hit: stay solid, paint as empty brick.
 #define MAX_USED_Q 8
@@ -273,7 +299,7 @@ uint8_t usedQCount = 0;
 
 // Queued block rects to rewrite into GRAM once, world-first, so the
 // brick disappears and whatever was behind it (sky, hill, etc.) shows.
-#define MAX_ERASE 2
+#define MAX_ERASE 4
 struct EraseRect {
   int32_t x;
   int16_t y;
@@ -332,20 +358,19 @@ uint8_t circTab[12][12];
 bool controllerOk = false;
 
 uint32_t lastStep = 0;
+#if DEBUG_SERIAL
 uint32_t lastReport = 0;
 uint16_t frameCount = 0;
 uint32_t pixelCount = 0;
+#endif
 
 // --- Game flow ------------------------------------------------------------
 
 #define START_LIVES    3
 #define LIVES_HOLD_MS  2000
 
-// Death beat: freeze the fatal frame, squat, then hop and fall off-screen.
-// Kept short so the SPI dirty-rect path is the only cost after the hold.
+// Death beat: freeze the fatal frame, then a normal jump and fall off-screen.
 #define DEATH_HOLD_MS  450
-#define DEATH_SQUAT_MS 220
-#define DEATH_JUMP_Q   (-VEL_Q(145))
 
 enum : uint8_t {
   MODE_TITLE = 0,
@@ -361,7 +386,6 @@ enum : uint8_t {
   PLAY_RUN = 0,
   PLAY_PAUSE,
   PLAY_DEATH_HOLD,   // frozen world - show the mistake
-  PLAY_DEATH_SQUAT,  // crouch beat before the hop
   PLAY_DEATH_FALL    // no-collision jump, then fall through the map
 };
 
@@ -487,6 +511,22 @@ bool isBroken(int32_t section, uint8_t index) {
   return false;
 }
 
+void refreshScoreDigits() {
+  uint16_t s = score;
+  for (int8_t i = 4; i >= 0; i--) {
+    scoreDigits[i] = s % 10;
+    s /= 10;
+  }
+}
+
+void refreshTimeDigits() {
+  uint16_t t = timeLeft;
+  for (int8_t i = 2; i >= 0; i--) {
+    timeDigits[i] = t % 10;
+    t /= 10;
+  }
+}
+
 bool isUsedQ(int32_t section, uint8_t index) {
   for (uint8_t i = 0; i < usedQCount; i++) {
     if (usedQBlocks[i].section == (int16_t)section &&
@@ -506,10 +546,9 @@ void queueBlockErase(int32_t section, uint8_t index, uint8_t type) {
   r.h = objHeight(type);
 }
 
-// Marks the brick gone and queues a one-shot GRAM rewrite of its rect.
-// composeColumn will skip it from then on, so scroll/Mario dirty paints
-// do not put the brick back.
-void bustBrick(int32_t section, uint8_t index) {
+// Record a gone WORLD slot and queue a one-shot GRAM rewrite of its rect.
+// composeColumn skips it afterward so dirty paints do not put it back.
+void markGone(int32_t section, uint8_t index, uint8_t type) {
   if (isBroken(section, index)) return;
 
   if (brokenCount < MAX_BROKEN) {
@@ -518,13 +557,25 @@ void bustBrick(int32_t section, uint8_t index) {
     brokenCount++;
   } else {
     // Ring: drop the oldest. Its GRAM hole stays until that column is
-    // dirtied again, at which point the brick can reappear - rare.
+    // dirtied again, at which point the object can reappear - rare.
     for (uint8_t i = 1; i < MAX_BROKEN; i++) brokenBricks[i - 1] = brokenBricks[i];
     brokenBricks[MAX_BROKEN - 1].section = (int16_t)section;
     brokenBricks[MAX_BROKEN - 1].index = index;
   }
 
-  queueBlockErase(section, index, O_BLOCK);
+  queueBlockErase(section, index, type);
+}
+
+void bustBrick(int32_t section, uint8_t index) {
+  markGone(section, index, O_BLOCK);
+}
+
+void collectCoin(int32_t section, uint8_t index) {
+  if (isBroken(section, index)) return;
+  markGone(section, index, O_COIN);
+  if (score <= 65535 - COIN_POINTS) score += COIN_POINTS;
+  else score = 65535;
+  refreshScoreDigits();
 }
 
 void spawnMushroom(int32_t worldX, int16_t blockY) {
@@ -693,15 +744,20 @@ void updatePlayer(const Buttons& btn) {
     velXq = MOVE_SPEED_Q;
     facingRight = true;
   }
+  if (btn.b && velXq) velXq += velXq >> 1;  // B: 1.5x run
 
-  bool jumpHeld = btn.a || btn.b;
+  // A jumps; hold length = height (extra gravity while rising if released).
+  // B at takeoff adds launch speed so run-jumps clear the high bricks.
+  bool jumpHeld = btn.a;
   if (jumpHeld && !jumpWasHeld && onGround) {
     velYq = JUMP_VEL_Q;
+    if (btn.b) velYq -= VEL_Q(30);  // ~60 px run-jump clears bricks
     onGround = false;
   }
   jumpWasHeld = jumpHeld;
 
   velYq += GRAVITY_Q;
+  if (!jumpHeld && velYq < 0) velYq += GRAVITY_Q;
   if (velYq > MAX_FALL_Q) velYq = MAX_FALL_Q;
 
   playerXq += velXq;
@@ -762,6 +818,9 @@ void resetLevel() {
   cameraX = 0;
   playState = PLAY_RUN;
   deathNeedsRender = false;
+  timeLeft = START_TIME;
+  timeTick = 0;
+  refreshTimeDigits();
 
   for (uint8_t i = 0; i < MAX_ENEMIES; i++) enemies[i].type = E_NONE;
   for (uint8_t i = 0; i < MAX_ITEMS; i++) items[i].type = IT_NONE;
@@ -770,6 +829,16 @@ void resetLevel() {
   usedQCount = 0;
   pendingEraseCount = 0;
   panelValid = false;
+}
+
+// Fatal hit / time-up: freeze, then death hop. Ignores power-up state.
+void forceDeath() {
+  if (playState != PLAY_RUN) return;
+  playState = PLAY_DEATH_HOLD;
+  deathMs = millis();
+  deathNeedsRender = true;
+  velXq = 0;
+  velYq = 0;
 }
 
 // Big Mario shrinks with brief invulnerability; small Mario dies.
@@ -781,11 +850,16 @@ void playerHit() {
     invulnTicks = INVULN_TICKS;
     return;
   }
-  playState = PLAY_DEATH_HOLD;
-  deathMs = millis();
-  deathNeedsRender = true;
-  velXq = 0;
-  velYq = 0;
+  forceDeath();
+}
+
+void tickTimer() {
+  if (++timeTick < TIME_TICKS) return;
+  timeTick = 0;
+  if (timeLeft == 0) return;
+  timeLeft--;
+  refreshTimeDigits();
+  if (timeLeft == 0) forceDeath();
 }
 
 void endDeath() {
@@ -1059,6 +1133,36 @@ void collideItems() {
   }
 }
 
+void collideCoins() {
+  int16_t playerPx = (int16_t)(playerXq >> 8);
+  int32_t baseSection = ((int32_t)playerPx / SECTION_W) - 1;
+  if (playerPx < 0) baseSection--;
+  int32_t phq = playerHQ();
+  int32_t cwq = (int32_t)objWidth(O_COIN) << 8;
+  int32_t chq = (int32_t)objHeight(O_COIN) << 8;
+
+  for (int8_t s = 0; s < 3; s++) {
+    int32_t section = baseSection + s;
+    int32_t origin = section * SECTION_W;
+
+    for (uint8_t i = 0; i < WORLD_COUNT; i++) {
+      if (pgm_read_byte(&WORLD[i].type) != O_COIN) continue;
+      if (isBroken(section, i)) continue;
+
+      int32_t sx = origin + (int16_t)pgm_read_word(&WORLD[i].x);
+      int32_t gap = sx - playerPx;
+      if (gap > PLAYER_W || gap < -(int16_t)objWidth(O_COIN)) continue;
+
+      int32_t sxq = sx << 8;
+      int32_t syq = (int32_t)pgm_read_byte(&WORLD[i].y) << 8;
+      if (playerXq >= sxq + cwq || playerXq + PLAYER_W_Q <= sxq) continue;
+      if (playerYq >= syq + chq || playerYq + phq <= syq) continue;
+
+      collectCoin(section, i);
+    }
+  }
+}
+
 // --- Column compositor ----------------------------------------------------
 
 // Game row -> GRAM column. A solid span is the same span reversed,
@@ -1166,6 +1270,46 @@ void colCoin(uint16_t* b, int16_t u, int16_t cy) {
   if (u == 4) vspan(b, cy + 2, cy + 7, WHITE);
 }
 
+// 3x5 digits, one byte per column, bit0 = top row. Gap column is empty.
+const uint8_t FONT3x5[] PROGMEM = {
+  0x1F, 0x11, 0x1F, // 0
+  0x00, 0x1F, 0x00, // 1
+  0x1D, 0x15, 0x17, // 2
+  0x15, 0x15, 0x1F, // 3
+  0x07, 0x04, 0x1F, // 4
+  0x17, 0x15, 0x1D, // 5
+  0x1F, 0x15, 0x1D, // 6
+  0x01, 0x01, 0x1F, // 7
+  0x1F, 0x15, 0x1F, // 8
+  0x17, 0x15, 0x1F, // 9
+};
+
+// One HUD digit column: 3x5 font scaled 2x (local 0..6, last is gap).
+void composeHudDigit(uint16_t* b, int16_t local, uint8_t dig, uint16_t color) {
+  uint8_t px = (uint8_t)(local % HUD_DIGIT_W);
+  if (px >= 6) return;
+  uint8_t bits = pgm_read_byte(&FONT3x5[dig * 3 + (px >> 1)]);
+  for (uint8_t row = 0; row < 5; row++) {
+    if (bits & (1 << row)) {
+      int16_t y = HUD_Y0 + (int16_t)(row << 1);
+      vspan(b, y, y + 1, color);
+    }
+  }
+}
+
+// Screen-fixed score (left) and timer (right) in the sky strip.
+void composeHud(uint16_t* b, int32_t worldX) {
+  int16_t sx = (int16_t)(worldX - cameraX);
+  if (sx >= SCORE_HUD_X && sx < SCORE_HUD_X + SCORE_HUD_W) {
+    int16_t local = sx - SCORE_HUD_X;
+    composeHudDigit(b, local, scoreDigits[local / HUD_DIGIT_W], WHITE);
+  } else if (sx >= TIME_HUD_X && sx < TIME_HUD_X + TIME_HUD_W) {
+    int16_t local = sx - TIME_HUD_X;
+    composeHudDigit(b, local, timeDigits[local / HUD_DIGIT_W],
+                    timeLeft <= 100 ? RED : WHITE);
+  }
+}
+
 void composeColumn(int32_t worldX, uint16_t* b) {
   vspan(b, 0, GROUND_Y - 1, SKY_BLUE);
   vspan(b, GROUND_Y, GROUND_Y + 3, GRASS);
@@ -1181,7 +1325,7 @@ void composeColumn(int32_t worldX, uint16_t* b) {
 
   for (uint8_t i = 0; i < WORLD_COUNT; i++) {
     uint8_t type = pgm_read_byte(&WORLD[i].type);
-    if (type == O_BLOCK && isBroken(section, i)) continue;
+    if ((type == O_BLOCK || type == O_COIN) && isBroken(section, i)) continue;
 
     int16_t u = wx - (int16_t)pgm_read_word(&WORLD[i].x);
     if (u < 0 || u >= (int16_t)objWidth(type)) continue;
@@ -1198,6 +1342,7 @@ void composeColumn(int32_t worldX, uint16_t* b) {
     }
   }
 
+  composeHud(b, worldX);
   if (!controllerOk && worldX < 24) vspan(b, 4, 10, RED);
 }
 
@@ -1337,18 +1482,6 @@ void composeRunner(uint16_t* b, int32_t worldX) {
   uint16_t accent = playAsLuigi ? LUIGI_GRN : RED;
 
   if (!bigMario) {
-    if (playState == PLAY_DEATH_SQUAT) {
-      runnerPart(b, lu, py, 3, 4, 8, 2, accent);
-      runnerPart(b, lu, py, 1, 6, 12, 2, accent);
-      runnerPart(b, lu, py, 4, 8, 7, 2, SKIN);
-      runnerPart(b, lu, py, 2, 10, 10, 2, BLUE);
-      runnerPart(b, lu, py, 0, 10, 3, 2, accent);
-      runnerPart(b, lu, py, 11, 10, 3, 2, accent);
-      runnerPart(b, lu, py, 1, 12, 5, 2, DARK_DIRT);
-      runnerPart(b, lu, py, 8, 12, 5, 2, DARK_DIRT);
-      return;
-    }
-
     runnerPart(b, lu, py, 3, 0, 8, 2, accent);
     runnerPart(b, lu, py, 1, 2, 12, 2, accent);
     runnerPart(b, lu, py, 4, 4, 7, 4, SKIN);
@@ -1367,21 +1500,6 @@ void composeRunner(uint16_t* b, int32_t worldX) {
       runnerPart(b, lu, py, 0, 11, 5, 2, DARK_DIRT);
       runnerPart(b, lu, py, 9, 11, 4, 3, DARK_DIRT);
     }
-    return;
-  }
-
-  // Crouch beat: same bbox, body packed to the feet so the erase rect
-  // from the standing pose stays valid without an extra full-column paint.
-  if (playState == PLAY_DEATH_SQUAT) {
-    runnerPart(b, lu, py, 3, 8, 8, 3, accent);
-    runnerPart(b, lu, py, 1, 11, 12, 3, accent);
-    runnerPart(b, lu, py, 4, 14, 7, 3, SKIN);
-    runnerPart(b, lu, py, 9, 15, 2, 2, DARK_DIRT);
-    runnerPart(b, lu, py, 2, 17, 10, 3, BLUE);
-    runnerPart(b, lu, py, 0, 17, 3, 3, accent);
-    runnerPart(b, lu, py, 11, 17, 3, 3, accent);
-    runnerPart(b, lu, py, 1, 20, 5, 2, DARK_DIRT);
-    runnerPart(b, lu, py, 8, 20, 5, 2, DARK_DIRT);
     return;
   }
 
@@ -1424,7 +1542,9 @@ void pushColumn(int32_t worldX, int16_t y0, int16_t y1) {
   uint8_t len = (uint8_t)(y1 - y0 + 1);
   tft.setAddrWindow(c0, gramRow(worldX), len, 1);
   tft.writePixels(colBuf + c0, len);
+#if DEBUG_SERIAL
   pixelCount += len;
+#endif
 }
 
 void paintColumn(int32_t worldX, int16_t y0, int16_t y1) {
@@ -1600,6 +1720,24 @@ void render() {
     paintEnemyRects(cam);
     paintItemRects(cam);
 
+    // Screen-fixed HUD: repaint the union of last and current strips so
+    // columns that scrolled out of the band are rewritten as plain sky
+    // (composeHud only stamps digits at the current screen X).
+    {
+      int32_t s0 = min(panelCam + SCORE_HUD_X, cam + SCORE_HUD_X);
+      int32_t s1 = max(panelCam + SCORE_HUD_X, cam + SCORE_HUD_X) + SCORE_HUD_W - 1;
+      for (int32_t wx = s0; wx <= s1; wx++) {
+        if (wx < cam || wx > cam + SCREEN_WIDTH - 1) continue;
+        paintColumn(wx, 0, HUD_Y1);
+      }
+      int32_t t0 = min(panelCam + TIME_HUD_X, cam + TIME_HUD_X);
+      int32_t t1 = max(panelCam + TIME_HUD_X, cam + TIME_HUD_X) + TIME_HUD_W - 1;
+      for (int32_t wx = t0; wx <= t1; wx++) {
+        if (wx < cam || wx > cam + SCREEN_WIDTH - 1) continue;
+        paintColumn(wx, 0, HUD_Y1);
+      }
+    }
+
     tft.endWrite();
   }
 
@@ -1633,6 +1771,14 @@ void enterMode(uint8_t mode) {
   // Pad lines often read "pressed" on boot / mode change; wait for a
   // clean release before Start/A can advance the menu again.
   menuArmed = false;
+
+  if (mode == MODE_TITLE) {
+    score = 0;
+    refreshScoreDigits();
+    timeLeft = START_TIME;
+    timeTick = 0;
+    refreshTimeDigits();
+  }
 
   if (mode == MODE_PLAY) {
     applyGameRemap();
@@ -1813,7 +1959,9 @@ void updateDead(bool eStart, bool startDown, bool aDown) {
 }
 
 void setup(void) {
+#if DEBUG_SERIAL
   Serial.begin(115200);
+#endif
   buildCircTab();
 
   tft.begin();  // library default is already 8 MHz, the AVR ceiling
@@ -1826,12 +1974,14 @@ void setup(void) {
   tft.fillScreen(BLACK);
 
   controllerOk = initController();
+#if DEBUG_SERIAL
   Serial.println(controllerOk ? F("NES pad found at 0x52")
                               : F("NES pad NOT found (check SDA/SCL/3.3V)"));
   Serial.println(F("Mount display rotated 90 deg counter-clockwise"));
+  lastReport = millis();
+#endif
 
   lastStep = millis();
-  lastReport = lastStep;
 
   enterMode(MODE_TITLE);
 }
@@ -1887,28 +2037,15 @@ void loop() {
     if (deathNeedsRender) {
       render();
       deathNeedsRender = false;
+#if DEBUG_SERIAL
       frameCount++;
+#endif
     }
     if (now - deathMs >= DEATH_HOLD_MS) {
-      playState = PLAY_DEATH_SQUAT;
-      deathMs = now;
-      deathNeedsRender = true;
-    }
-    return;
-  }
-
-  if (playState == PLAY_DEATH_SQUAT) {
-    lastStep = now;
-    if (deathNeedsRender) {
-      render();
-      deathNeedsRender = false;
-      frameCount++;
-    }
-    if (now - deathMs >= DEATH_SQUAT_MS) {
       playState = PLAY_DEATH_FALL;
       onGround = false;
       velXq = 0;
-      velYq = DEATH_JUMP_Q;
+      velYq = JUMP_VEL_Q;
       lastStep = now;
     }
     return;
@@ -1929,7 +2066,9 @@ void loop() {
 
     if (steps) {
       render();
+#if DEBUG_SERIAL
       frameCount++;
+#endif
     }
   } else {
     // PLAY_RUN
@@ -1951,6 +2090,8 @@ void loop() {
       collideShellHits();
       collideEnemies();
       collideItems();
+      collideCoins();
+      tickTimer();
       lastStep += STEP_MS;
       steps++;
       if (playState != PLAY_RUN) break;
@@ -1963,17 +2104,22 @@ void loop() {
       if (deathNeedsRender) {
         render();
         deathNeedsRender = false;
+#if DEBUG_SERIAL
         frameCount++;
+#endif
       }
       return;
     }
 
     if (steps) {
       render();
+#if DEBUG_SERIAL
       frameCount++;
+#endif
     }
   }
 
+#if DEBUG_SERIAL
   if (now - lastReport >= 1000) {
     Serial.print(frameCount);
     Serial.print(F(" fps, "));
@@ -1983,4 +2129,5 @@ void loop() {
     frameCount = 0;
     pixelCount = 0;
   }
+#endif
 }

@@ -8,6 +8,7 @@ Playable Mario-style side-scroller on a 128×128 SSD1351 OLED, built for an ATme
 |------|----------------|
 | **SSD1351 OLED** | Hardware SPI: CS → 10, DC → 7, RST → 8 (SCLK → 13, MOSI → 11). Mount the module **rotated 90° counter-clockwise**. |
 | **NES Classic / clone** | I2C at `0x52`: VCC → 3.3V, GND → GND, SDA → A4, SCL → A5. Default clock `400000` (drop to `100000` if a long cable is flaky). |
+| **Piezo / passive buzzer** | Signal → **D9**, other lead → GND. Must be *passive* (not a self-driving active buzzer). A short boot chirp plays on reset if wiring is good. |
 
 If the picture is mirrored or sky is on the wrong side, toggle `FLIP_Y`. If the world scrolls the wrong way relative to Mario, toggle `SCROLL_REVERSE`.
 
@@ -32,6 +33,7 @@ The panel is square, so rotating the module 90° costs no screen area. Scrolling
 | **Input** | NES Classic (clone) over I2C |
 | **Sim** | Fixed-timestep physics + AABB solids |
 | **World** | One 320 px section in `PROGMEM`, tiled forever |
+| **Audio** | `tone()` on D9 + flash note phrases (`Audio.cpp`) |
 | **Compositor** | Per-column sky / ground / objects / player → `colBuf[]` |
 | **Display** | Partial SPI writes + start-line pan |
 
@@ -59,11 +61,12 @@ Fixed-point Q8.8 (`playerXq` / `playerYq` and velocities). Camera tracks the pla
 
 ## Game loop
 
-`loop()` runs a fixed simulation step of `STEP_MS` (16 ms), with a catch-up cap of 3 steps per pass:
+`loop()` advances the audio sequencer, then runs a fixed simulation step of `STEP_MS` (33 ms ≈ 30 Hz), with a catch-up cap of 3 steps per pass:
 
-1. Read the pad → `updatePlayer` (move, jump edge, gravity, solids, floor, camera).
-2. If any step ran → `render()`.
-3. Once per second, print FPS and average pixels/frame over Serial (115200 baud).
+1. `audioUpdate()` — non-blocking note scheduler (Timer1 owns the pin).
+2. Read the pad → `updatePlayer` (move, jump edge, gravity, solids, floor, camera).
+3. If any step ran → `render()`.
+4. Once per second, print FPS and average pixels/frame over Serial (115200 baud).
 
 ## Rendering pipeline
 
@@ -87,9 +90,10 @@ Fixed-point Q8.8 (`playerXq` / `playerYq` and velocities). Camera tracks the pla
 
 ## Memory and performance
 
-- World data and Serial strings live in `PROGMEM` / `F()`.
+- World data, Serial strings, and audio phrases live in `PROGMEM` / `F()`.
 - One 256-byte column buffer — not a full framebuffer.
 - Precomputed `circTab[12][12]` for cloud / hill / coin discs.
+- Audio SRAM is a few bytes of sequencer state; the square wave is hardware PWM/CTC (no sample buffer).
 - Bus time is dominated by dirty pixels, not geometry math.
 
 ## Sketch map
@@ -97,19 +101,20 @@ Fixed-point Q8.8 (`playerXq` / `playerYq` and velocities). Camera tracks the pla
 | Section | Responsibility |
 |---------|----------------|
 | Header / pins / toggles | Display size, SPI pins, `FLIP_Y`, `SCROLL_REVERSE`, I2C clock |
+| `Audio.h` / `Audio.cpp` | Piezo SFX + looping BGM on D9 |
 | Controller | Init + button decode for NES Classic over Wire |
 | World geometry | Object sizes, solid flags |
 | Physics | `resolveSolids`, `updatePlayer` |
 | Column compositor | Sky, ground, clouds, hills, blocks, pipes, coins |
 | Player sprite | Column slices of Mario (`composeRunner`) |
 | Output | `pushColumn`, `setStartLine`, `render` |
-| `setup` / `loop` | Init display remap, controller, fixed timestep, FPS report |
+| `setup` / `loop` | Init display remap, controller, audio, fixed timestep, FPS report |
 
 ## Building
 
-Open `RGB_Screen_TEST.ino` in the Arduino IDE (or use `arduino-cli`). Requires:
+Open `Super_Marduino_Bros/Super_Marduino_Bros.ino` in the Arduino IDE (or use `arduino-cli`). Requires:
 
 - [Adafruit GFX Library](https://github.com/adafruit/Adafruit-GFX-Library)
 - [Adafruit SSD1351](https://github.com/adafruit/Adafruit-SSD1351-library)
 
-Select your board (e.g. Arduino Nano / Uno), upload, and open Serial Monitor at 115200 baud for FPS stats.
+Select your board (e.g. Arduino Nano / Uno), upload. Set `DEBUG_SERIAL` to `1` in the sketch for FPS stats over Serial at 115200 baud (costs flash).
