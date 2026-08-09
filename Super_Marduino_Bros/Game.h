@@ -76,6 +76,7 @@ void collideEnemies();
 void updateItems();
 void collideItems();
 void collideCoins();
+void collideFlag();
 void tickTimer();
 
 #endif

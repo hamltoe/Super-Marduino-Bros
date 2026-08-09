@@ -9,5 +9,6 @@ void updateSelect(bool eStart, bool eA, bool eLeft, bool eRight,
                   bool eUp, bool eDown, bool startDown, bool aDown);
 void updateLives(bool eStart, bool startDown, bool aDown);
 void updateDead(bool eStart, bool startDown, bool aDown);
+void updateWin(bool eStart, bool startDown, bool aDown);
 
 #endif

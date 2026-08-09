@@ -119,6 +119,13 @@ static void drawDead() {
   uiPrint_P(34, 78, F("PRESS START"), YELLOW, 1);
 }
 
+static void drawWin() {
+  uiClear();
+  uiCenter(44, F("CLEAR!"), GREEN, 2);
+  uiMenuCursor(22, 78, true);
+  uiPrint_P(34, 78, F("PRESS START"), YELLOW, 1);
+}
+
 static void paintUiIfDirty(void (*draw)()) {
   if (!uiDirty) return;
   draw();
@@ -176,6 +183,14 @@ void updateLives(bool eStart, bool startDown, bool aDown) {
 
 void updateDead(bool eStart, bool startDown, bool aDown) {
   paintUiIfDirty(drawDead);
+  if (menuConfirm(eStart, false, startDown, aDown)) {
+    audioPlay(SFX_BLIP);
+    enterMode(MODE_TITLE);
+  }
+}
+
+void updateWin(bool eStart, bool startDown, bool aDown) {
+  paintUiIfDirty(drawWin);
   if (menuConfirm(eStart, false, startDown, aDown)) {
     audioPlay(SFX_BLIP);
     enterMode(MODE_TITLE);

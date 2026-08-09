@@ -41,7 +41,7 @@
     World      - PROGMEM level + gone/?-block state
     Game       - player, enemies, items, physics, score
     Display    - column compositor + SSD1351 output
-    UI         - title / select / lives / game-over
+    UI         - title / select / lives / game-over / course clear
     Audio      - piezo SFX/BGM (Timer1 CTC)
  ****************************************************/
 
@@ -112,6 +112,9 @@ void loop() {
         break;
       case MODE_DEAD:
         updateDead(eStart, btn.start, btn.a);
+        break;
+      case MODE_WIN:
+        updateWin(eStart, btn.start, btn.a);
         break;
       default:
         break;
@@ -192,6 +195,7 @@ void loop() {
       collideEnemies();
       collideItems();
       collideCoins();
+      collideFlag();
       tickTimer();
       lastStep += STEP_MS;
       steps++;

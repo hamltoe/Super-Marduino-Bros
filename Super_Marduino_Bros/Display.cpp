@@ -112,6 +112,16 @@ static void colPipe(uint16_t* b, int16_t u) {
   if (u == 6) vspan(b, GROUND_Y - 31, GROUND_Y - 1, PIPE_HI);
 }
 
+// Goal pole + red flag cloth to the right of the shaft.
+static void colFlag(uint16_t* b, int16_t u, int16_t top) {
+  if (u <= 2) vspan(b, top + 4, GROUND_Y - 1, u == 1 ? GREEN : WHITE);
+  if (u <= 2) colDisc(b, u - 1, 2, top + 2, WHITE);
+  if (u >= 3 && u <= 12) {
+    int16_t drop = (int16_t)(u - 3);
+    vspan(b, top + 6 + drop, top + 18 - drop, RED);
+  }
+}
+
 static void colCoin(uint16_t* b, int16_t u, int16_t cy) {
   colDisc(b, u - 4, 4, cy + 5, YELLOW);
   if (u == 4) vspan(b, cy + 2, cy + 7, WHITE);
@@ -173,6 +183,12 @@ static void composeColumn(int32_t worldX, uint16_t* b) {
     vspan(b, GROUND_Y + 15, GROUND_Y + 15, DARK_DIRT);
   }
 
+  // Past the course: sky + ground only (no repeating scenery).
+  if (worldX < 0 || worldX >= LEVEL_W) {
+    composeHud(b, worldX);
+    return;
+  }
+
   int32_t section = worldX / SECTION_W;
   int16_t wx = (int16_t)(worldX - section * SECTION_W);
 
@@ -190,6 +206,7 @@ static void composeColumn(int32_t worldX, uint16_t* b) {
       case O_HILL2:  colHill(b, u, HILL_LIGHT); break;
       case O_COIN:   colCoin(b, u, oy); break;
       case O_PIPE:   colPipe(b, u); break;
+      case O_FLAG:   colFlag(b, u, oy); break;
       case O_QBLOCK: colBlock(b, u, oy, !isUsedQ(section, i)); break;
       default:       colBlock(b, u, oy, false); break;
     }

@@ -65,11 +65,15 @@
 #define UI_DIM     0x8410
 
 #define GROUND_Y       104
-#define SECTION_W      320
+// Finite World 1-1: one section spans the whole course (no wrap).
+#define LEVEL_W        1200
+#define SECTION_W      LEVEL_W
+#define FLAG_X         1110
 #define PLAYER_W       14
 #define PLAYER_H_SMALL 14
 #define PLAYER_H_BIG   22
 #define CAMERA_MARGIN  40
+#define TIME_BONUS     50
 
 #define STEP_MS 33    // 16ms @ 60 fps, 33ms @ 30 fps
 
@@ -97,9 +101,7 @@
 #define O_QBLOCK 4
 #define O_COIN   5
 #define O_PIPE   6
-
-#define Q_NONE     0
-#define Q_MUSHROOM 1
+#define O_FLAG   7
 
 #define E_NONE   0
 #define E_GOOMBA 1
@@ -164,7 +166,8 @@ enum : uint8_t {
   MODE_SELECT,
   MODE_LIVES,
   MODE_PLAY,
-  MODE_DEAD
+  MODE_DEAD,
+  MODE_WIN
 };
 
 enum : uint8_t {

@@ -4,12 +4,11 @@
 #include "Config.h"
 
 extern const ObjDef WORLD[];
-extern const uint8_t WORLD_LOOT[];
 extern const EnemyDef SPAWNS[];
 
 // Keep in sync with the PROGMEM tables in World.cpp (AVR const = RAM).
-#define WORLD_COUNT 15
-#define SPAWN_COUNT 4
+#define WORLD_COUNT 41
+#define SPAWN_COUNT 5
 
 extern BrokenBrick brokenBricks[];
 extern uint8_t brokenCount;

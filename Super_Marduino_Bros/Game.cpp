@@ -104,12 +104,9 @@ static void hitQBlock(int32_t section, uint8_t index) {
   queueBlockErase(section, index, O_QBLOCK);
   audioPlay(SFX_BUMP);
 
-  uint8_t loot = pgm_read_byte(&WORLD_LOOT[index]);
-  if (loot == Q_MUSHROOM) {
-    int32_t wx = section * SECTION_W + (int16_t)pgm_read_word(&WORLD[index].x);
-    int16_t by = pgm_read_byte(&WORLD[index].y);
-    spawnMushroom(wx, by);
-  }
+  int32_t wx = section * SECTION_W + (int16_t)pgm_read_word(&WORLD[index].x);
+  int16_t by = pgm_read_byte(&WORLD[index].y);
+  spawnMushroom(wx, by);
 }
 
 static void growMario() {
@@ -130,6 +127,7 @@ static bool boxVsSolids(int32_t xq, int32_t yq, int32_t wq, int32_t hq, int32_t*
 
   for (int8_t s = 0; s < 3; s++) {
     int32_t section = baseSection + s;
+    if (section != 0) continue;
     int32_t origin = section * SECTION_W;
 
     for (uint8_t i = 0; i < WORLD_COUNT; i++) {
@@ -174,6 +172,7 @@ static void resolveSolids(bool canBust) {
 
   for (int8_t s = 0; s < 3; s++) {
     int32_t section = baseSection + s;
+    if (section != 0) continue;
     int32_t origin = section * SECTION_W;
 
     for (uint8_t i = 0; i < WORLD_COUNT; i++) {
@@ -254,6 +253,13 @@ void updatePlayer(const Buttons& btn) {
     playerXq = 0;
     velXq = 0;
   }
+  {
+    int32_t maxXq = (int32_t)(LEVEL_W - PLAYER_W) << 8;
+    if (playerXq > maxXq) {
+      playerXq = maxXq;
+      velXq = 0;
+    }
+  }
   resolveSolids(false);
 
   playerYq += velYq;
@@ -272,6 +278,11 @@ void updatePlayer(const Buttons& btn) {
   int16_t playerPx = (int16_t)(playerXq >> 8);
   cameraX = playerPx - CAMERA_MARGIN;
   if (cameraX < 0) cameraX = 0;
+  {
+    int32_t maxCam = (int32_t)LEVEL_W - SCREEN_WIDTH;
+    if (maxCam < 0) maxCam = 0;
+    if (cameraX > maxCam) cameraX = maxCam;
+  }
 
   animFrame = (uint8_t)((playerPx >> 3) & 1);
 }
@@ -376,9 +387,12 @@ void updateDeathFall() {
 
 void spawnEnemies() {
   int32_t limit = cameraX + SCREEN_WIDTH + 8;
+  if (limit > LEVEL_W) limit = LEVEL_W;
   if (limit <= spawnFrontier) return;
 
+  // Finite course: only section 0 holds the layout.
   for (int32_t s = spawnFrontier / SECTION_W; s <= limit / SECTION_W; s++) {
+    if (s != 0) continue;
     int32_t origin = s * SECTION_W;
 
     for (uint8_t d = 0; d < SPAWN_COUNT; d++) {
@@ -617,6 +631,7 @@ void collideCoins() {
 
   for (int8_t s = 0; s < 3; s++) {
     int32_t section = baseSection + s;
+    if (section != 0) continue;
     int32_t origin = section * SECTION_W;
 
     for (uint8_t i = 0; i < WORLD_COUNT; i++) {
@@ -635,4 +650,24 @@ void collideCoins() {
       collectCoin(section, i);
     }
   }
+}
+
+void collideFlag() {
+  if (playState != PLAY_RUN) return;
+
+  int16_t playerPx = (int16_t)(playerXq >> 8);
+  // Thin pole only (cloth is decorative).
+  if (playerPx + PLAYER_W <= FLAG_X || playerPx >= FLAG_X + 3) return;
+
+  int16_t flagTop = GROUND_Y - 72;
+  int16_t py = (int16_t)(playerYq >> 8);
+  if (py + playerH() <= flagTop || py >= GROUND_Y) return;
+
+  uint32_t bonus = (uint32_t)timeLeft * TIME_BONUS;
+  if ((uint32_t)score + bonus > 65535UL) score = 65535;
+  else score = (uint16_t)(score + bonus);
+  timeLeft = 0;
+  audioStopBgm();
+  audioPlay(SFX_POWERUP);
+  enterMode(MODE_WIN);
 }

@@ -37,7 +37,7 @@ static const Note PH_GAMEOVER[] PROGMEM = {
 static const Note PH_BGM[] PROGMEM = {
   N(523, 110), N(659, 110), N(784, 110), N(659, 110),
   N(698, 110), N(880, 110), N(784, 200),
-  N(659, 110), N(523, 110), N(587, 110), N(523, 160), N(0, 50),
+  N(659, 110), N(523, 160), N(0, 50),
 };
 
 struct Phrase {
