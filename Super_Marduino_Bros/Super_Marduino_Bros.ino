@@ -4,6 +4,8 @@
   Controls: NES Classic / clone controller over I2C
     VCC -> 3.3V, GND -> GND, SDA -> A4, SCL -> A5
 
+  Audio: passive piezo/buzzer on D9 (Timer1 CTC), see Audio.h / Audio.cpp
+
   *** MOUNT THE DISPLAY ROTATED 90 DEGREES COUNTER-CLOCKWISE ***
 
   HARDWARE SCROLLING
@@ -75,6 +77,7 @@
 #include <Adafruit_SSD1351.h>
 #include <SPI.h>
 #include <Wire.h>
+#include "Audio.h"
 
 Adafruit_SSD1351 tft = Adafruit_SSD1351(SCREEN_WIDTH, SCREEN_HEIGHT, &SPI, CS_PIN, DC_PIN, RST_PIN);
 
@@ -290,10 +293,7 @@ uint8_t timeTick = 0;
 
 // ? blocks that have been hit: stay solid, paint as empty brick.
 #define MAX_USED_Q 8
-struct UsedQBlock {
-  int16_t section;
-  uint8_t index;
-};
+typedef BrokenBrick UsedQBlock;
 UsedQBlock usedQBlocks[MAX_USED_Q];
 uint8_t usedQCount = 0;
 
@@ -482,60 +482,43 @@ Buttons readController() {
 
 // --- World geometry -------------------------------------------------------
 
-uint8_t objWidth(uint8_t t) {
-  switch (t) {
-    case O_CLOUD: return 28;
-    case O_HILL:
-    case O_HILL2: return 51;
-    case O_COIN:  return 9;
-    case O_PIPE:  return 24;
-    default:      return 15;
-  }
-}
+const uint8_t OBJ_W[] PROGMEM = {28, 51, 51, 15, 15, 9, 24};
+const uint8_t OBJ_H[] PROGMEM = {15, 15, 15, 15, 15, 15, 34};
 
-uint8_t objHeight(uint8_t t) {
-  return (t == O_PIPE) ? 34 : 15;
-}
+uint8_t objWidth(uint8_t t)  { return pgm_read_byte(&OBJ_W[t]); }
+uint8_t objHeight(uint8_t t) { return pgm_read_byte(&OBJ_H[t]); }
 
 bool objSolid(uint8_t t) {
   return t == O_BLOCK || t == O_QBLOCK || t == O_PIPE;
 }
 
-bool isBroken(int32_t section, uint8_t index) {
-  for (uint8_t i = 0; i < brokenCount; i++) {
-    if (brokenBricks[i].section == (int16_t)section &&
-        brokenBricks[i].index == index) {
+bool slotMarked(const BrokenBrick* list, uint8_t count,
+                int32_t section, uint8_t index) {
+  for (uint8_t i = 0; i < count; i++) {
+    if (list[i].section == (int16_t)section && list[i].index == index) {
       return true;
     }
   }
   return false;
 }
 
-void refreshScoreDigits() {
-  uint16_t s = score;
-  for (int8_t i = 4; i >= 0; i--) {
-    scoreDigits[i] = s % 10;
-    s /= 10;
-  }
-}
-
-void refreshTimeDigits() {
-  uint16_t t = timeLeft;
-  for (int8_t i = 2; i >= 0; i--) {
-    timeDigits[i] = t % 10;
-    t /= 10;
-  }
+bool isBroken(int32_t section, uint8_t index) {
+  return slotMarked(brokenBricks, brokenCount, section, index);
 }
 
 bool isUsedQ(int32_t section, uint8_t index) {
-  for (uint8_t i = 0; i < usedQCount; i++) {
-    if (usedQBlocks[i].section == (int16_t)section &&
-        usedQBlocks[i].index == index) {
-      return true;
-    }
-  }
-  return false;
+  return slotMarked(usedQBlocks, usedQCount, section, index);
 }
+
+void fillDigits(uint8_t* out, uint8_t n, uint16_t v) {
+  for (int8_t i = (int8_t)n - 1; i >= 0; i--) {
+    out[i] = v % 10;
+    v /= 10;
+  }
+}
+
+void refreshScoreDigits() { fillDigits(scoreDigits, 5, score); }
+void refreshTimeDigits()  { fillDigits(timeDigits, 3, timeLeft); }
 
 void queueBlockErase(int32_t section, uint8_t index, uint8_t type) {
   if (pendingEraseCount >= MAX_ERASE) return;
@@ -568,6 +551,7 @@ void markGone(int32_t section, uint8_t index, uint8_t type) {
 
 void bustBrick(int32_t section, uint8_t index) {
   markGone(section, index, O_BLOCK);
+  audioPlay(SFX_BREAK);
 }
 
 void collectCoin(int32_t section, uint8_t index) {
@@ -576,6 +560,7 @@ void collectCoin(int32_t section, uint8_t index) {
   if (score <= 65535 - COIN_POINTS) score += COIN_POINTS;
   else score = 65535;
   refreshScoreDigits();
+  audioPlay(SFX_COIN);
 }
 
 void spawnMushroom(int32_t worldX, int16_t blockY) {
@@ -611,6 +596,7 @@ void hitQBlock(int32_t section, uint8_t index) {
   }
 
   queueBlockErase(section, index, O_QBLOCK);
+  audioPlay(SFX_BUMP);
 
   uint8_t loot = pgm_read_byte(&WORLD_LOOT[index]);
   if (loot == Q_MUSHROOM) {
@@ -625,6 +611,7 @@ void growMario() {
   bigMario = true;
   // Keep feet planted while the hitbox grows upward.
   playerYq -= (int32_t)(PLAYER_H_BIG - PLAYER_H_SMALL) << 8;
+  audioPlay(SFX_POWERUP);
 }
 
 // --- Physics --------------------------------------------------------------
@@ -753,6 +740,7 @@ void updatePlayer(const Buttons& btn) {
     velYq = JUMP_VEL_Q;
     if (btn.b) velYq -= VEL_Q(30);  // ~60 px run-jump clears bricks
     onGround = false;
+    audioPlay(SFX_JUMP);
   }
   jumpWasHeld = jumpHeld;
 
@@ -839,6 +827,8 @@ void forceDeath() {
   deathNeedsRender = true;
   velXq = 0;
   velYq = 0;
+  audioStopBgm();
+  audioPlay(SFX_DEATH);
 }
 
 // Big Mario shrinks with brief invulnerability; small Mario dies.
@@ -848,6 +838,7 @@ void playerHit() {
     bigMario = false;
     playerYq += (int32_t)(PLAYER_H_BIG - PLAYER_H_SMALL) << 8;
     invulnTicks = INVULN_TICKS;
+    audioPlay(SFX_POWERDOWN);
     return;
   }
   forceDeath();
@@ -870,6 +861,7 @@ void endDeath() {
     enterMode(MODE_LIVES);
   } else {
     lives = 0;
+    audioPlay(SFX_GAMEOVER);
     enterMode(MODE_DEAD);
   }
 }
@@ -917,38 +909,43 @@ void spawnEnemies() {
   spawnFrontier = limit;
 }
 
+// Shared walk / gravity / floor for enemies and mushrooms.
+void integrateActor(int32_t& xq, int32_t& yq, int16_t& vxq, int16_t& vyq,
+                    int16_t w, int16_t h) {
+  int32_t wq = (int32_t)w << 8;
+  int32_t hq = (int32_t)h << 8;
+
+  if (vxq) {
+    xq += vxq;
+    if (boxVsSolids(xq, yq, wq, hq, NULL)) {
+      xq -= vxq;
+      vxq = -vxq;
+    }
+  }
+
+  vyq += GRAVITY_Q;
+  if (vyq > MAX_FALL_Q) vyq = MAX_FALL_Q;
+  yq += vyq;
+
+  int32_t lift;
+  if (boxVsSolids(xq, yq, wq, hq, &lift)) {
+    yq -= lift;
+    if (vyq > 0) vyq = 0;
+  }
+
+  int32_t floorQ = (int32_t)(GROUND_Y - h) << 8;
+  if (yq >= floorQ) {
+    yq = floorQ;
+    vyq = 0;
+  }
+}
+
 void updateEnemy(Enemy& e) {
   if (e.state == ES_SQUASH) {
     if (--e.timer == 0) e.state = ES_GONE;
     return;
   }
-
-  int32_t wq = (int32_t)enemyWidth(e) << 8;
-  int32_t hq = (int32_t)enemyHeight(e) << 8;
-
-  if (e.vxq) {
-    e.xq += e.vxq;
-    if (boxVsSolids(e.xq, e.yq, wq, hq, NULL)) {
-      e.xq -= e.vxq;
-      e.vxq = -e.vxq;
-    }
-  }
-
-  e.vyq += GRAVITY_Q;
-  if (e.vyq > MAX_FALL_Q) e.vyq = MAX_FALL_Q;
-  e.yq += e.vyq;
-
-  int32_t lift;
-  if (boxVsSolids(e.xq, e.yq, wq, hq, &lift)) {
-    e.yq -= lift;
-    if (e.vyq > 0) e.vyq = 0;
-  }
-
-  int32_t floorQ = (int32_t)(GROUND_Y - (hq >> 8)) << 8;
-  if (e.yq >= floorQ) {
-    e.yq = floorQ;
-    e.vyq = 0;
-  }
+  integrateActor(e.xq, e.yq, e.vxq, e.vyq, enemyWidth(e), enemyHeight(e));
 }
 
 void updateEnemies() {
@@ -986,6 +983,7 @@ void defeatEnemy(Enemy& e) {
     e.state = ES_GONE;
     e.vxq = 0;
   }
+  audioPlay(SFX_STOMP);
 }
 
 // Sliding shells wipe out anything they overlap. O(n^2) over MAX_ENEMIES
@@ -1039,22 +1037,27 @@ void collideEnemies() {
         e.timer = SQUASH_TICKS;
         e.vxq = 0;
         e.yq += (int32_t)(GOOMBA_H - SQUASH_H) << 8;
+        audioPlay(SFX_STOMP);
       } else if (e.state == ES_WALK) {
         e.state = ES_SHELL;
         e.vxq = 0;
         e.yq += (int32_t)(KOOPA_H - SHELL_H) << 8;
+        audioPlay(SFX_STOMP);
       } else if (e.state == ES_SLIDE) {
         e.state = ES_SHELL;
         e.vxq = 0;
+        audioPlay(SFX_STOMP);
       } else {
         e.state = ES_SLIDE;
         e.vxq = facingRight ? SHELL_SPEED_Q : -SHELL_SPEED_Q;
+        audioPlay(SFX_KICK);
       }
     } else if (e.state == ES_SHELL) {
       bool fromLeft = playerXq < e.xq;
       e.state = ES_SLIDE;
       e.vxq = fromLeft ? SHELL_SPEED_Q : -SHELL_SPEED_Q;
       playerXq += fromLeft ? -(int32_t)(3 << 8) : (int32_t)(3 << 8);
+      audioPlay(SFX_KICK);
     } else if (invulnTicks == 0) {
       playerHit();
       return;
@@ -1071,33 +1074,7 @@ void updateItem(Item& it) {
     }
     return;
   }
-
-  int32_t wq = (int32_t)MUSH_W << 8;
-  int32_t hq = (int32_t)MUSH_H << 8;
-
-  if (it.vxq) {
-    it.xq += it.vxq;
-    if (boxVsSolids(it.xq, it.yq, wq, hq, NULL)) {
-      it.xq -= it.vxq;
-      it.vxq = -it.vxq;
-    }
-  }
-
-  it.vyq += GRAVITY_Q;
-  if (it.vyq > MAX_FALL_Q) it.vyq = MAX_FALL_Q;
-  it.yq += it.vyq;
-
-  int32_t lift;
-  if (boxVsSolids(it.xq, it.yq, wq, hq, &lift)) {
-    it.yq -= lift;
-    if (it.vyq > 0) it.vyq = 0;
-  }
-
-  int32_t floorQ = (int32_t)(GROUND_Y - MUSH_H) << 8;
-  if (it.yq >= floorQ) {
-    it.yq = floorQ;
-    it.vyq = 0;
-  }
+  integrateActor(it.xq, it.yq, it.vxq, it.vyq, MUSH_W, MUSH_H);
 }
 
 void updateItems() {
@@ -1358,58 +1335,35 @@ void spritePart(uint16_t* b, int16_t lu, int16_t top, int16_t lx, int16_t ly,
 }
 
 void colGoomba(uint16_t* b, int16_t u, int16_t top, uint8_t frame) {
-  spritePart(b, u, top, 3, 0, 8, 2, GOOMBA_W, false, GOOMBA_BR);
-  spritePart(b, u, top, 1, 2, 12, 2, GOOMBA_W, false, GOOMBA_BR);
-  spritePart(b, u, top, 0, 4, 14, 6, GOOMBA_W, false, GOOMBA_BR);
-
-  spritePart(b, u, top, 3, 5, 2, 4, GOOMBA_W, false, WHITE);
-  spritePart(b, u, top, 9, 5, 2, 4, GOOMBA_W, false, WHITE);
-  spritePart(b, u, top, 4, 6, 1, 3, GOOMBA_W, false, BLACK);
-  spritePart(b, u, top, 9, 6, 1, 3, GOOMBA_W, false, BLACK);
-
-  spritePart(b, u, top, 2, 10, 10, 2, GOOMBA_W, false, DARK_DIRT);
-
-  if (frame == 0) {
-    spritePart(b, u, top, 0, 12, 5, 2, GOOMBA_W, false, GOOMBA_FT);
-    spritePart(b, u, top, 9, 12, 5, 2, GOOMBA_W, false, GOOMBA_FT);
-  } else {
-    spritePart(b, u, top, 2, 12, 5, 2, GOOMBA_W, false, GOOMBA_FT);
-    spritePart(b, u, top, 7, 12, 5, 2, GOOMBA_W, false, GOOMBA_FT);
-  }
+  spritePart(b, u, top, 1, 0, 12, 10, GOOMBA_W, false, GOOMBA_BR);
+  spritePart(b, u, top, 3, 4, 2, 3, GOOMBA_W, false, WHITE);
+  spritePart(b, u, top, 9, 4, 2, 3, GOOMBA_W, false, WHITE);
+  spritePart(b, u, top, 4, 5, 1, 2, GOOMBA_W, false, BLACK);
+  spritePart(b, u, top, 9, 5, 1, 2, GOOMBA_W, false, BLACK);
+  int16_t fx = frame ? 2 : 0;
+  spritePart(b, u, top, fx, 12, 5, 2, GOOMBA_W, false, GOOMBA_FT);
+  spritePart(b, u, top, 9 - fx, 12, 5, 2, GOOMBA_W, false, GOOMBA_FT);
 }
 
 void colSquashed(uint16_t* b, int16_t u, int16_t top) {
-  spritePart(b, u, top, 1, 0, 12, 2, GOOMBA_W, false, GOOMBA_BR);
-  spritePart(b, u, top, 0, 2, 14, 2, GOOMBA_W, false, DARK_DIRT);
+  spritePart(b, u, top, 0, 0, 14, 4, GOOMBA_W, false, GOOMBA_BR);
   spritePart(b, u, top, 0, 4, 14, 2, GOOMBA_W, false, GOOMBA_FT);
-  spritePart(b, u, top, 3, 0, 2, 2, GOOMBA_W, false, BLACK);
-  spritePart(b, u, top, 9, 0, 2, 2, GOOMBA_W, false, BLACK);
 }
 
 void colShellBody(uint16_t* b, int16_t u, int16_t top) {
-  spritePart(b, u, top, 1, 0, 11, 1, KOOPA_W, false, SHELL_GRN);
-  spritePart(b, u, top, 0, 1, 13, 8, KOOPA_W, false, SHELL_GRN);
+  spritePart(b, u, top, 0, 0, 13, 9, KOOPA_W, false, SHELL_GRN);
   spritePart(b, u, top, 2, 2, 9, 5, KOOPA_W, false, SHELL_LT);
-  spritePart(b, u, top, 4, 3, 5, 3, KOOPA_W, false, SHELL_GRN);
   spritePart(b, u, top, 0, 9, 13, 3, KOOPA_W, false, SHELL_RIM);
 }
 
 void colKoopa(uint16_t* b, int16_t u, int16_t top, uint8_t frame, bool flip) {
-  spritePart(b, u, top, 3, 0, 7, 6, KOOPA_W, flip, KOOPA_SKIN);
-  spritePart(b, u, top, 9, 2, 3, 3, KOOPA_W, flip, KOOPA_SKIN);
+  spritePart(b, u, top, 3, 0, 7, 7, KOOPA_W, flip, KOOPA_SKIN);
   spritePart(b, u, top, 6, 1, 3, 3, KOOPA_W, flip, WHITE);
   spritePart(b, u, top, 7, 2, 1, 2, KOOPA_W, flip, BLACK);
-  spritePart(b, u, top, 4, 6, 5, 2, KOOPA_W, flip, KOOPA_SKIN);
-
   colShellBody(b, u, top + 7);
-
-  if (frame == 0) {
-    spritePart(b, u, top, 0, 18, 5, 2, KOOPA_W, flip, KOOPA_SKIN);
-    spritePart(b, u, top, 8, 18, 5, 2, KOOPA_W, flip, KOOPA_SKIN);
-  } else {
-    spritePart(b, u, top, 1, 18, 5, 2, KOOPA_W, flip, KOOPA_SKIN);
-    spritePart(b, u, top, 7, 18, 5, 2, KOOPA_W, flip, KOOPA_SKIN);
-  }
+  int16_t fx = frame ? 1 : 0;
+  spritePart(b, u, top, fx, 18, 5, 2, KOOPA_W, flip, KOOPA_SKIN);
+  spritePart(b, u, top, 8 - fx, 18, 5, 2, KOOPA_W, flip, KOOPA_SKIN);
 }
 
 void composeEnemies(uint16_t* b, int32_t worldX) {
@@ -1440,19 +1394,14 @@ void composeEnemies(uint16_t* b, int32_t worldX) {
 
 void runnerPart(uint16_t* b, int16_t lu, int16_t py, int16_t lx, int16_t ly,
                 int16_t w, int16_t h, uint16_t color) {
-  int16_t x0 = facingRight ? lx : (PLAYER_W - lx - w);
-  if (lu < x0 || lu >= x0 + w) return;
-  vspan(b, py + ly, py + ly + h - 1, color);
+  spritePart(b, lu, py, lx, ly, w, h, PLAYER_W, !facingRight, color);
 }
 
 void colMushroom(uint16_t* b, int16_t u, int16_t top) {
-  spritePart(b, u, top, 2, 0, 10, 2, MUSH_W, false, RED);
-  spritePart(b, u, top, 0, 2, 14, 5, MUSH_W, false, RED);
+  spritePart(b, u, top, 0, 0, 14, 7, MUSH_W, false, RED);
   spritePart(b, u, top, 3, 2, 2, 2, MUSH_W, false, WHITE);
   spritePart(b, u, top, 9, 3, 2, 2, MUSH_W, false, WHITE);
   spritePart(b, u, top, 4, 7, 6, 5, MUSH_W, false, SKIN);
-  spritePart(b, u, top, 3, 8, 2, 2, MUSH_W, false, DARK_DIRT);
-  spritePart(b, u, top, 9, 8, 2, 2, MUSH_W, false, DARK_DIRT);
   spritePart(b, u, top, 2, 12, 4, 2, MUSH_W, false, SKIN);
   spritePart(b, u, top, 8, 12, 4, 2, MUSH_W, false, SKIN);
 }
@@ -1480,46 +1429,35 @@ void composeRunner(uint16_t* b, int32_t worldX) {
 
   int16_t lu = (int16_t)(worldX - left);
   uint16_t accent = playAsLuigi ? LUIGI_GRN : RED;
+  // Big Mario is small Mario stretched ~1.5x in Y (integer parts below).
+  const bool big = bigMario;
+  const int16_t hatH = big ? 3 : 2;
+  const int16_t faceY = big ? 6 : 4;
+  const int16_t faceH = big ? 5 : 4;
+  const int16_t bodyY = big ? 11 : 8;
+  const int16_t bodyH = big ? 7 : 3;
+  const int16_t armY = big ? 12 : 8;
+  const int16_t armH = big ? 5 : 3;
+  const int16_t legY = big ? 18 : 11;
+  const int16_t legH = big ? 4 : 3;
 
-  if (!bigMario) {
-    runnerPart(b, lu, py, 3, 0, 8, 2, accent);
-    runnerPart(b, lu, py, 1, 2, 12, 2, accent);
-    runnerPart(b, lu, py, 4, 4, 7, 4, SKIN);
-    runnerPart(b, lu, py, 9, 5, 2, 2, DARK_DIRT);
-    runnerPart(b, lu, py, 2, 8, 10, 3, BLUE);
-    runnerPart(b, lu, py, 0, 8, 3, 3, accent);
-    runnerPart(b, lu, py, 11, 8, 3, 3, accent);
-
-    if (!onGround || playState == PLAY_DEATH_FALL) {
-      runnerPart(b, lu, py, 1, 11, 4, 3, DARK_DIRT);
-      runnerPart(b, lu, py, 9, 11, 4, 3, DARK_DIRT);
-    } else if (animFrame == 0) {
-      runnerPart(b, lu, py, 2, 11, 4, 3, DARK_DIRT);
-      runnerPart(b, lu, py, 9, 11, 5, 2, DARK_DIRT);
-    } else {
-      runnerPart(b, lu, py, 0, 11, 5, 2, DARK_DIRT);
-      runnerPart(b, lu, py, 9, 11, 4, 3, DARK_DIRT);
-    }
-    return;
-  }
-
-  runnerPart(b, lu, py, 3, 0, 8, 3, accent);
-  runnerPart(b, lu, py, 1, 3, 12, 3, accent);
-  runnerPart(b, lu, py, 4, 6, 7, 5, SKIN);
-  runnerPart(b, lu, py, 9, 7, 2, 2, DARK_DIRT);
-  runnerPart(b, lu, py, 2, 11, 10, 7, BLUE);
-  runnerPart(b, lu, py, 0, 12, 3, 5, accent);
-  runnerPart(b, lu, py, 11, 12, 3, 5, accent);
+  runnerPart(b, lu, py, 3, 0, 8, hatH, accent);
+  runnerPart(b, lu, py, 1, hatH, 12, hatH, accent);
+  runnerPart(b, lu, py, 4, faceY, 7, faceH, SKIN);
+  runnerPart(b, lu, py, 9, faceY + 1, 2, 2, DARK_DIRT);
+  runnerPart(b, lu, py, 2, bodyY, 10, bodyH, BLUE);
+  runnerPart(b, lu, py, 0, armY, 3, armH, accent);
+  runnerPart(b, lu, py, 11, armY, 3, armH, accent);
 
   if (!onGround || playState == PLAY_DEATH_FALL) {
-    runnerPart(b, lu, py, 1, 18, 4, 4, DARK_DIRT);
-    runnerPart(b, lu, py, 9, 18, 4, 4, DARK_DIRT);
+    runnerPart(b, lu, py, 1, legY, 4, legH, DARK_DIRT);
+    runnerPart(b, lu, py, 9, legY, 4, legH, DARK_DIRT);
   } else if (animFrame == 0) {
-    runnerPart(b, lu, py, 2, 18, 4, 4, DARK_DIRT);
-    runnerPart(b, lu, py, 9, 18, 5, 3, DARK_DIRT);
+    runnerPart(b, lu, py, 2, legY, 4, legH, DARK_DIRT);
+    runnerPart(b, lu, py, 9, legY, 5, legH - 1, DARK_DIRT);
   } else {
-    runnerPart(b, lu, py, 0, 18, 5, 3, DARK_DIRT);
-    runnerPart(b, lu, py, 9, 18, 4, 4, DARK_DIRT);
+    runnerPart(b, lu, py, 0, legY, 5, legH - 1, DARK_DIRT);
+    runnerPart(b, lu, py, 9, legY, 4, legH, DARK_DIRT);
   }
 }
 
@@ -1568,9 +1506,26 @@ void setStartLine(int32_t cam) {
   tft.sendCommand(SSD1351_CMD_STARTLINE, &v, 1);
 }
 
-// Repaints what each enemy covered and now covers, world-first, the
-// same way Mario's slice is handled. A slot marked ES_GONE is drawn
-// out of its last rectangle and then freed.
+// Dirty-rect paint for a moving actor. Returns true if the slot should free.
+bool paintActorRect(int32_t cam, int32_t& prevX, int16_t& prevY,
+                    int32_t cx, int16_t cy, int16_t w, int16_t maxH, bool gone) {
+  int32_t x0 = gone ? prevX : min(prevX, cx);
+  int32_t x1 = (gone ? prevX : max(prevX, cx)) + w - 1;
+  int16_t y0 = gone ? prevY : min(prevY, cy);
+  int16_t y1 = (gone ? prevY : max(prevY, cy)) + maxH - 1;
+  if (y0 < 0) y0 = 0;
+  if (y1 > SCREEN_HEIGHT - 1) y1 = SCREEN_HEIGHT - 1;
+
+  for (int32_t wx = x0; wx <= x1; wx++) {
+    if (wx < cam || wx > cam + SCREEN_WIDTH - 1) continue;
+    paintColumn(wx, y0, y1);
+  }
+
+  prevX = cx;
+  prevY = cy;
+  return gone;
+}
+
 void paintEnemyRects(int32_t cam) {
   for (uint8_t i = 0; i < MAX_ENEMIES; i++) {
     Enemy& e = enemies[i];
@@ -1580,28 +1535,16 @@ void paintEnemyRects(int32_t cam) {
     int16_t cy = (int16_t)(e.yq >> 8);
     bool gone = (e.state == ES_GONE);
 
-    // A parked shell or a flattened Goomba has no animation, so once
-    // it stops moving its pixels are already right.
+    // Parked shell / flattened Goomba: pixels already correct if still.
     if (!gone && cx == e.prevX && cy == e.prevY &&
         (e.state == ES_SHELL || e.state == ES_SQUASH)) {
       continue;
     }
 
-    int32_t x0 = gone ? e.prevX : min(e.prevX, cx);
-    int32_t x1 = (gone ? e.prevX : max(e.prevX, cx)) + enemyWidth(e) - 1;
-    int16_t y0 = gone ? e.prevY : min(e.prevY, cy);
-    int16_t y1 = (gone ? e.prevY : max(e.prevY, cy)) + enemyMaxHeight(e) - 1;
-    if (y0 < 0) y0 = 0;
-    if (y1 > SCREEN_HEIGHT - 1) y1 = SCREEN_HEIGHT - 1;
-
-    for (int32_t wx = x0; wx <= x1; wx++) {
-      if (wx < cam || wx > cam + SCREEN_WIDTH - 1) continue;
-      paintColumn(wx, y0, y1);
+    if (paintActorRect(cam, e.prevX, e.prevY, cx, cy,
+                       enemyWidth(e), enemyMaxHeight(e), gone)) {
+      e.type = E_NONE;
     }
-
-    e.prevX = cx;
-    e.prevY = cy;
-    if (gone) e.type = E_NONE;
   }
 }
 
@@ -1623,25 +1566,11 @@ void paintItemRects(int32_t cam) {
     Item& it = items[i];
     if (it.type == IT_NONE) continue;
 
-    int32_t cx = it.xq >> 8;
-    int16_t cy = (int16_t)(it.yq >> 8);
-    bool gone = (it.state == IS_GONE);
-
-    int32_t x0 = gone ? it.prevX : min(it.prevX, cx);
-    int32_t x1 = (gone ? it.prevX : max(it.prevX, cx)) + MUSH_W - 1;
-    int16_t y0 = gone ? it.prevY : min(it.prevY, cy);
-    int16_t y1 = (gone ? it.prevY : max(it.prevY, cy)) + MUSH_H - 1;
-    if (y0 < 0) y0 = 0;
-    if (y1 > SCREEN_HEIGHT - 1) y1 = SCREEN_HEIGHT - 1;
-
-    for (int32_t wx = x0; wx <= x1; wx++) {
-      if (wx < cam || wx > cam + SCREEN_WIDTH - 1) continue;
-      paintColumn(wx, y0, y1);
+    if (paintActorRect(cam, it.prevX, it.prevY,
+                       it.xq >> 8, (int16_t)(it.yq >> 8),
+                       MUSH_W, MUSH_H, it.state == IS_GONE)) {
+      it.type = IT_NONE;
     }
-
-    it.prevX = cx;
-    it.prevY = cy;
-    if (gone) it.type = IT_NONE;
   }
 }
 
@@ -1760,7 +1689,6 @@ void applyGameRemap() {
 
 void applyUiRemap() {
   tft.setRotation(UI_ROTATION);
-  tft.setFont();  // classic 5x7 built into Adafruit_GFX
   tft.setTextWrap(false);
 }
 
@@ -1778,18 +1706,19 @@ void enterMode(uint8_t mode) {
     timeLeft = START_TIME;
     timeTick = 0;
     refreshTimeDigits();
+    audioStopBgm();
   }
 
   if (mode == MODE_PLAY) {
     applyGameRemap();
     resetLevel();
     lastStep = millis();
+    audioStartBgm();
   } else {
     applyUiRemap();
+    if (mode != MODE_TITLE) audioStopBgm();
   }
 }
-
-// --- Immediate-mode UI (library coordinates after applyUiRemap) -----------
 
 void uiFill(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
   if (w <= 0 || h <= 0) return;
@@ -1800,17 +1729,11 @@ void uiClear() {
   tft.fillScreen(BLACK);
 }
 
-uint8_t uiStrWidth(const char* s, uint8_t size) {
+uint8_t uiStrLen_P(const __FlashStringHelper* fs) {
+  const char* s = (const char*)fs;
   uint8_t n = 0;
-  while (s[n]) n++;
-  return (uint8_t)(n * 6 * size);
-}
-
-void uiPrint(int16_t x, int16_t y, const char* s, uint16_t color, uint8_t size) {
-  tft.setTextSize(size);
-  tft.setTextColor(color);
-  tft.setCursor(x, y);
-  tft.print(s);
+  while (pgm_read_byte(s++)) n++;
+  return n;
 }
 
 void uiPrint_P(int16_t x, int16_t y, const __FlashStringHelper* fs,
@@ -1821,25 +1744,13 @@ void uiPrint_P(int16_t x, int16_t y, const __FlashStringHelper* fs,
   tft.print(fs);
 }
 
-uint8_t uiStrWidth_P(const __FlashStringHelper* fs, uint8_t size) {
-  const char* s = (const char*)fs;
-  uint8_t n = 0;
-  while (pgm_read_byte(s++)) n++;
-  return (uint8_t)(n * 6 * size);
-}
-
 void uiCenter(int16_t y, const __FlashStringHelper* s, uint16_t color, uint8_t size) {
-  int16_t x = (SCREEN_WIDTH - (int16_t)uiStrWidth_P(s, size)) / 2;
+  int16_t x = (SCREEN_WIDTH - (int16_t)uiStrLen_P(s) * 6 * size) / 2;
   uiPrint_P(x, y, s, color, size);
 }
 
-void uiCenterCStr(int16_t y, const char* s, uint16_t color, uint8_t size) {
-  int16_t x = (SCREEN_WIDTH - (int16_t)uiStrWidth(s, size)) / 2;
-  uiPrint(x, y, s, color, size);
-}
-
 void uiMenuCursor(int16_t x, int16_t y, bool on) {
-  if (on) uiPrint_P(x, y, F(">"), YELLOW, 1);
+  if (on) uiFill(x, y + 2, 3, 2, YELLOW), uiFill(x + 3, y + 1, 3, 4, YELLOW);
 }
 
 void uiRunnerSwatch(int16_t x, int16_t y, bool luigi) {
@@ -1884,13 +1795,11 @@ void drawLives() {
   uiClear();
   if (playAsLuigi) uiCenter(36, F("LUIGI"), LUIGI_GRN, 2);
   else             uiCenter(36, F("MARIO"), RED, 2);
-
-  char line[8];
-  line[0] = 'x';
-  line[1] = ' ';
-  line[2] = (char)('0' + lives);
-  line[3] = '\0';
-  uiCenterCStr(68, line, WHITE, 2);
+  char line[4] = {'x', ' ', (char)('0' + lives), '\0'};
+  tft.setTextSize(2);
+  tft.setTextColor(WHITE);
+  tft.setCursor((SCREEN_WIDTH - 36) / 2, 68);
+  tft.print(line);
 }
 
 void drawDead() {
@@ -1918,6 +1827,7 @@ void updateTitle(bool eStart, bool eA, bool startDown, bool aDown) {
   paintUiIfDirty(drawTitle);
   if (menuConfirm(eStart, eA, startDown, aDown)) {
     selectIdx = playAsLuigi ? 1 : 0;
+    audioPlay(SFX_BLIP);
     enterMode(MODE_SELECT);
   }
 }
@@ -1926,9 +1836,11 @@ void updateSelect(bool eStart, bool eA, bool eLeft, bool eRight,
                   bool eUp, bool eDown, bool startDown, bool aDown) {
   if (menuArmed) {
     if (eLeft || eUp) {
+      if (selectIdx != 0) audioPlay(SFX_BLIP);
       selectIdx = 0;
       uiDirty = true;
     } else if (eRight || eDown) {
+      if (selectIdx != 1) audioPlay(SFX_BLIP);
       selectIdx = 1;
       uiDirty = true;
     }
@@ -1939,6 +1851,7 @@ void updateSelect(bool eStart, bool eA, bool eLeft, bool eRight,
   if (menuConfirm(eStart, eA, startDown, aDown)) {
     playAsLuigi = (selectIdx == 1);
     lives = START_LIVES;
+    audioPlay(SFX_BLIP);
     enterMode(MODE_LIVES);
   }
 }
@@ -1954,6 +1867,7 @@ void updateLives(bool eStart, bool startDown, bool aDown) {
 void updateDead(bool eStart, bool startDown, bool aDown) {
   paintUiIfDirty(drawDead);
   if (menuConfirm(eStart, false, startDown, aDown)) {
+    audioPlay(SFX_BLIP);
     enterMode(MODE_TITLE);
   }
 }
@@ -1981,6 +1895,8 @@ void setup(void) {
   lastReport = millis();
 #endif
 
+  audioInit();  // boot blip on D9 if the piezo is wired
+
   lastStep = millis();
 
   enterMode(MODE_TITLE);
@@ -1988,6 +1904,7 @@ void setup(void) {
 
 void loop() {
   uint32_t now = millis();
+  audioUpdate();
   Buttons btn = readController();
 
   bool eStart = btn.start && !prevStart;
@@ -2028,7 +1945,11 @@ void loop() {
   // so catch-up steps do not burst when gameplay resumes.
   if (playState == PLAY_PAUSE) {
     lastStep = now;
-    if (eStart) playState = PLAY_RUN;
+    if (eStart) {
+      playState = PLAY_RUN;
+      audioSetPaused(false);
+      audioPlay(SFX_PAUSE);
+    }
     return;
   }
 
@@ -2075,6 +1996,8 @@ void loop() {
     if (eStart) {
       playState = PLAY_PAUSE;
       lastStep = now;
+      audioSetPaused(true);
+      audioPlay(SFX_PAUSE);
       return;
     }
 
