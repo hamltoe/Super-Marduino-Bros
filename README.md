@@ -1,4 +1,4 @@
-# Mario-style SSD1351 scroller for the Arduino Nano
+# Mario-style scroller for the Arduino Nano
 
 Playable Mario-style side-scroller on a 128×128 SSD1351 OLED, built for an ATmega328P-class board (Arduino Nano / Uno). The design centers on **hardware scrolling + column compositing** so SPI bandwidth stays within what the AVR can sustain.
 
