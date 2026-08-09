@@ -10,7 +10,7 @@ Playable Mario-style side-scroller on a 128×128 SSD1351 OLED, built for an ATme
 | **NES Classic / clone** | I2C at `0x52`: VCC → 3.3V, GND → GND, SDA → A4, SCL → A5. Default clock `400000` (drop to `100000` if a long cable is flaky). |
 | **Piezo / passive buzzer** | Signal → **D9**, other lead → GND. Must be *passive* (not a self-driving active buzzer). A short boot chirp plays on reset if wiring is good. |
 
-If the picture is mirrored or sky is on the wrong side, toggle `FLIP_Y`. If the world scrolls the wrong way relative to Mario, toggle `SCROLL_REVERSE`.
+If the picture is mirrored or sky is on the wrong side, toggle `FLIP_Y` in `Config.h`. If the world scrolls the wrong way relative to Mario, toggle `SCROLL_REVERSE` there too.
 
 Without a controller, inputs stay idle and a red strip in early columns signals “no pad.”
 
@@ -26,16 +26,31 @@ The SSD1351 **Set Display Start Line** register (`0xA1`) slides the panel over i
 
 The panel is square, so rotating the module 90° costs no screen area. Scrolling goes from ~16 000 pixels per frame to roughly one new world column plus a repaint of the ~15 columns Mario occupies.
 
-## Layers
+## File structure
 
-| Layer | Role |
-|-------|------|
+Everything lives under `Super_Marduino_Bros/`. Modules are `.h` / `.cpp` pairs (same pattern as Audio) so each area can be edited without scrolling a 2k-line sketch. Layout is chosen to stay flash-small on the Nano: PROGMEM data stays in one translation unit, headers declare only, and file-local helpers are `static`.
+
+```
+Super_Marduino_Bros/
+  Super_Marduino_Bros.ino   setup() / loop() glue
+  Config.h                  pins, colors, physics constants, shared structs
+  Input.h / Input.cpp       NES Classic over I2C
+  World.h / World.cpp       PROGMEM level + broken / ?-block state
+  Game.h / Game.cpp         player, enemies, items, physics, score / timer
+  Display.h / Display.cpp   column compositor + SSD1351 output
+  UI.h / UI.cpp             title / select / lives / game-over
+  Audio.h / Audio.cpp       piezo SFX + BGM (Timer1 CTC on D9)
+```
+
+| Module | Role |
+|--------|------|
+| **Config** | Board pins, feature flags (`FLIP_Y`, `SCROLL_REVERSE`, `DEBUG_SERIAL`), colors, Q8.8 motion macros |
 | **Input** | NES Classic (clone) over I2C |
-| **Sim** | Fixed-timestep physics + AABB solids |
-| **World** | One 320 px section in `PROGMEM`, tiled forever |
-| **Audio** | `tone()` on D9 + flash note phrases (`Audio.cpp`) |
-| **Compositor** | Per-column sky / ground / objects / player → `colBuf[]` |
-| **Display** | Partial SPI writes + start-line pan |
+| **World** | One 320 px section in `PROGMEM`, tiled forever; gone-brick / used-`?` tracking |
+| **Game** | Fixed-timestep physics, AABB solids, enemies, items, score / lives / death |
+| **Display** | Per-column compose → `colBuf[]`, dirty rects, partial SPI writes, start-line pan |
+| **UI** | Immediate-mode menus (Adafruit GFX font) + mode transitions |
+| **Audio** | Timer1 CTC square wave on D9 + flash note phrases |
 
 ## Data model
 
@@ -63,7 +78,7 @@ Fixed-point Q8.8 (`playerXq` / `playerYq` and velocities). Camera tracks the pla
 
 `loop()` advances the audio sequencer, then runs a fixed simulation step of `STEP_MS` (33 ms ≈ 30 Hz), with a catch-up cap of 3 steps per pass:
 
-1. `audioUpdate()` — non-blocking note scheduler (Timer1 owns the pin).
+1. `audioUpdate()` — non-blocking note scheduler (Timer1 toggles D9).
 2. Read the pad → `updatePlayer` (move, jump edge, gravity, solids, floor, camera).
 3. If any step ran → `render()`.
 4. Once per second, print FPS and average pixels/frame over Serial (115200 baud).
@@ -96,25 +111,11 @@ Fixed-point Q8.8 (`playerXq` / `playerYq` and velocities). Camera tracks the pla
 - Audio SRAM is a few bytes of sequencer state; the square wave is hardware PWM/CTC (no sample buffer).
 - Bus time is dominated by dirty pixels, not geometry math.
 
-## Sketch map
-
-| Section | Responsibility |
-|---------|----------------|
-| Header / pins / toggles | Display size, SPI pins, `FLIP_Y`, `SCROLL_REVERSE`, I2C clock |
-| `Audio.h` / `Audio.cpp` | Piezo SFX + looping BGM on D9 |
-| Controller | Init + button decode for NES Classic over Wire |
-| World geometry | Object sizes, solid flags |
-| Physics | `resolveSolids`, `updatePlayer` |
-| Column compositor | Sky, ground, clouds, hills, blocks, pipes, coins |
-| Player sprite | Column slices of Mario (`composeRunner`) |
-| Output | `pushColumn`, `setStartLine`, `render` |
-| `setup` / `loop` | Init display remap, controller, audio, fixed timestep, FPS report |
-
 ## Building
 
-Open `Super_Marduino_Bros/Super_Marduino_Bros.ino` in the Arduino IDE (or use `arduino-cli`). Requires:
+Open `Super_Marduino_Bros/Super_Marduino_Bros.ino` in the Arduino IDE (or use `arduino-cli`). The IDE compiles every `.cpp` in that folder with the sketch. Requires:
 
 - [Adafruit GFX Library](https://github.com/adafruit/Adafruit-GFX-Library)
 - [Adafruit SSD1351](https://github.com/adafruit/Adafruit-SSD1351-library)
 
-Select your board (e.g. Arduino Nano / Uno), upload. Set `DEBUG_SERIAL` to `1` in the sketch for FPS stats over Serial at 115200 baud (costs flash).
+Select your board (e.g. Arduino Nano / Uno), upload. Set `DEBUG_SERIAL` to `1` in `Config.h` for FPS stats over Serial at 115200 baud (costs flash).
