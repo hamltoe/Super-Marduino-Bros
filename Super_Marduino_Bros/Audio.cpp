@@ -187,6 +187,21 @@ static const Note PH_BGM_WATER[] PROGMEM = {
   N(392, 156), N(0, 250), N(0, 219),
 };
 
+// Castle bass ostinato, left-hand only (90 BPM), +1 octave so the piezo
+// can speak it. The MIDI's right-hand 16th figures are dropped. One 8 s
+// cycle; the file is four repeats.
+static const Note PH_BGM_CASTLE[] PROGMEM = {
+  N(312, 250), N(312, 250), N(312, 250), N(312, 250),
+  N(312, 250), N(312, 83), N(294, 250), N(294, 250),
+  N(294, 167), N(370, 250), N(370, 250), N(370, 167),
+  N(350, 250), N(350, 250), N(350, 250), N(350, 250),
+  N(350, 250), N(350, 83), N(330, 250), N(330, 250),
+  N(330, 167), N(466, 250), N(466, 250), N(466, 167),
+  N(440, 250), N(440, 250), N(440, 167), N(330, 250),
+  N(330, 250), N(330, 167), N(312, 250), N(312, 250),
+  N(312, 167), N(330, 250), N(330, 250), N(330, 167),
+};
+
 static const uint8_t BGM_OVER_LOOP_IDX = 11;
 
 static const Note* bgmNotes = PH_BGM_OVER;
@@ -335,6 +350,10 @@ void audioStartBgm() {
   if (levelTheme == TH_WATER) {
     bgmNotes = PH_BGM_WATER;
     bgmLen = (uint8_t)(sizeof(PH_BGM_WATER) / sizeof(Note));
+    bgmLoopIdx = 0;
+  } else if (levelTheme == TH_CASTLE) {
+    bgmNotes = PH_BGM_CASTLE;
+    bgmLen = (uint8_t)(sizeof(PH_BGM_CASTLE) / sizeof(Note));
     bgmLoopIdx = 0;
   } else {
     bgmNotes = PH_BGM_OVER;
