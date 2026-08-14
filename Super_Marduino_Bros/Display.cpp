@@ -115,52 +115,6 @@ static void colCoin(uint16_t* b, int16_t u, int16_t cy) {
   if (u == 4) vspan(b, cy + 2, cy + 7, WHITE);
 }
 
-// 3x5 digits, one byte per column, bit0 = top row. Gap column is empty.
-static const uint8_t FONT3x5[] PROGMEM = {
-  0x1F, 0x11, 0x1F, // 0
-  0x00, 0x1F, 0x00, // 1
-  0x1D, 0x15, 0x17, // 2
-  0x15, 0x15, 0x1F, // 3
-  0x07, 0x04, 0x1F, // 4
-  0x17, 0x15, 0x1D, // 5
-  0x1F, 0x15, 0x1D, // 6
-  0x01, 0x01, 0x1F, // 7
-  0x1F, 0x15, 0x1F, // 8
-  0x17, 0x15, 0x1F, // 9
-};
-
-// One HUD digit column: 3x5 font scaled 2x (local 0..6, last is gap).
-static void composeHudDigit(uint16_t* b, int16_t local, uint8_t dig, uint16_t color) {
-  uint8_t px = (uint8_t)(local % HUD_DIGIT_W);
-  if (px >= 6) return;
-  uint8_t bits = pgm_read_byte(&FONT3x5[dig * 3 + (px >> 1)]);
-  for (uint8_t row = 0; row < 5; row++) {
-    if (bits & (1 << row)) {
-      int16_t y = HUD_Y0 + (int16_t)(row << 1);
-      vspan(b, y, y + 1, color);
-    }
-  }
-}
-
-// Digit idx from the left of a zero-padded n-digit value (no RAM cache).
-static uint8_t nthDigit(uint16_t v, uint8_t idx, uint8_t n) {
-  for (uint8_t i = (uint8_t)(n - 1); i > idx; i--) v /= 10;
-  return (uint8_t)(v % 10);
-}
-
-// Screen-fixed score (left) and timer (right) in the sky strip.
-static void composeHud(uint16_t* b, int32_t worldX) {
-  int16_t sx = (int16_t)(worldX - cameraX);
-  if (sx >= SCORE_HUD_X && sx < SCORE_HUD_X + SCORE_HUD_W) {
-    int16_t local = sx - SCORE_HUD_X;
-    composeHudDigit(b, local, nthDigit(score, local / HUD_DIGIT_W, 5), WHITE);
-  } else if (sx >= TIME_HUD_X && sx < TIME_HUD_X + TIME_HUD_W) {
-    int16_t local = sx - TIME_HUD_X;
-    composeHudDigit(b, local, nthDigit(timeLeft, local / HUD_DIGIT_W, 3),
-                    timeLeft <= 100 ? RED : WHITE);
-  }
-}
-
 static void composeColumn(int32_t worldX, uint16_t* b) {
   if (levelFlags & LF_PITS) {
     vspan(b, 0, SCREEN_HEIGHT - 1, palSky);
@@ -179,10 +133,7 @@ static void composeColumn(int32_t worldX, uint16_t* b) {
   }
 
   // Past the course: sky + ground only (no repeating scenery).
-  if (worldX < 0 || worldX >= levelW) {
-    composeHud(b, worldX);
-    return;
-  }
+  if (worldX < 0 || worldX >= levelW) return;
 
   int16_t wx = (int16_t)worldX;
 
@@ -209,7 +160,6 @@ static void composeColumn(int32_t worldX, uint16_t* b) {
     }
   }
 
-  composeHud(b, worldX);
   if (!controllerOk && worldX < 24) vspan(b, 4, 10, RED);
 }
 
@@ -485,24 +435,6 @@ void render() {
 
     paintEnemyRects(cam);
     paintBeamRects(cam);
-
-    // Screen-fixed HUD: repaint the union of last and current strips so
-    // columns that scrolled out of the band are rewritten as plain sky
-    // (composeHud only stamps digits at the current screen X).
-    {
-      int32_t s0 = min(panelCam + SCORE_HUD_X, cam + SCORE_HUD_X);
-      int32_t s1 = max(panelCam + SCORE_HUD_X, cam + SCORE_HUD_X) + SCORE_HUD_W - 1;
-      for (int32_t wx = s0; wx <= s1; wx++) {
-        if (wx < cam || wx > cam + SCREEN_WIDTH - 1) continue;
-        paintColumn(wx, 0, HUD_Y1);
-      }
-      int32_t t0 = min(panelCam + TIME_HUD_X, cam + TIME_HUD_X);
-      int32_t t1 = max(panelCam + TIME_HUD_X, cam + TIME_HUD_X) + TIME_HUD_W - 1;
-      for (int32_t wx = t0; wx <= t1; wx++) {
-        if (wx < cam || wx > cam + SCREEN_WIDTH - 1) continue;
-        paintColumn(wx, 0, HUD_Y1);
-      }
-    }
 
     tft.endWrite();
   }

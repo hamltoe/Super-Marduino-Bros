@@ -15,8 +15,6 @@ void enterMode(uint8_t mode) {
 
   if (mode == MODE_TITLE) {
     score = 0;
-    timeLeft = START_TIME;
-    timeTick = 0;
     levelIdx = 0;
     audioStopBgm();
   }

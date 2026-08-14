@@ -202,6 +202,30 @@ static const Note PH_BGM_CASTLE[] PROGMEM = {
   N(312, 167), N(330, 250), N(330, 250), N(330, 167),
 };
 
+// Underground theme (110 BPM), +1 octave. MIDI lead-in rest omitted.
+static const Note PH_BGM_UNDER[] PROGMEM = {
+  N(262, 136), N(523, 136), N(220, 136), N(440, 136),
+  N(233, 136), N(466, 136), N(0, 250), N(0, 250),
+  N(0, 250), N(0, 250), N(0, 250), N(0, 114),
+  N(262, 136), N(523, 136), N(220, 136), N(440, 136),
+  N(233, 136), N(466, 136), N(0, 250), N(0, 250),
+  N(0, 250), N(0, 250), N(0, 250), N(0, 114),
+  N(175, 136), N(349, 136), N(147, 136), N(294, 136),
+  N(156, 136), N(311, 136), N(0, 250), N(0, 250),
+  N(0, 250), N(0, 250), N(0, 250), N(0, 114),
+  N(175, 136), N(349, 136), N(147, 136), N(294, 136),
+  N(156, 136), N(311, 136), N(0, 250), N(0, 250),
+  N(0, 250), N(0, 250), N(0, 91), N(311, 91),
+  N(294, 91), N(277, 91), N(262, 136), N(0, 136),
+  N(311, 136), N(0, 136), N(294, 136), N(0, 136),
+  N(208, 136), N(0, 136), N(196, 136), N(0, 136),
+  N(277, 136), N(0, 136), N(262, 91), N(370, 91),
+  N(349, 91), N(330, 91), N(466, 91), N(440, 91),
+  N(415, 136), N(0, 45), N(311, 136), N(0, 45),
+  N(247, 136), N(0, 45), N(233, 136), N(0, 45),
+  N(220, 136), N(0, 45), N(208, 136),
+};
+
 static const uint8_t BGM_OVER_LOOP_IDX = 11;
 
 static const Note* bgmNotes = PH_BGM_OVER;
@@ -354,6 +378,10 @@ void audioStartBgm() {
   } else if (levelTheme == TH_CASTLE) {
     bgmNotes = PH_BGM_CASTLE;
     bgmLen = (uint8_t)(sizeof(PH_BGM_CASTLE) / sizeof(Note));
+    bgmLoopIdx = 0;
+  } else if (levelTheme == TH_UNDER) {
+    bgmNotes = PH_BGM_UNDER;
+    bgmLen = (uint8_t)(sizeof(PH_BGM_UNDER) / sizeof(Note));
     bgmLoopIdx = 0;
   } else {
     bgmNotes = PH_BGM_OVER;

@@ -7,8 +7,6 @@
 extern Enemy enemies[];
 
 extern uint16_t score;
-extern uint16_t timeLeft;
-extern uint8_t timeTick;
 
 extern int32_t spawnFrontier;
 extern uint8_t animTick;
@@ -71,6 +69,5 @@ void updateEnemies();
 void collideEnemies();
 void collideCoins();
 void collideFlag();
-void tickTimer();
 
 #endif

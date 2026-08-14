@@ -77,7 +77,6 @@
 #define PLAYER_H_SMALL 14
 #define PLAYER_H_BIG   22
 #define CAMERA_MARGIN  40
-#define TIME_BONUS     50
 
 #define STEP_MS 33    // 16ms @ 60 fps, 33ms @ 30 fps
 
@@ -182,15 +181,6 @@
 #define MAX_ERASE 4
 
 #define COIN_POINTS   100
-#define START_TIME    300
-#define TIME_TICKS    (1000 / STEP_MS)  // ~1 s per countdown step
-#define HUD_DIGIT_W   7                 // 6 px glyph + 1 gap
-#define HUD_Y0        1
-#define HUD_Y1        10
-#define SCORE_HUD_X   2
-#define SCORE_HUD_W   (5 * HUD_DIGIT_W)
-#define TIME_HUD_W    (3 * HUD_DIGIT_W)
-#define TIME_HUD_X    (SCREEN_WIDTH - 2 - TIME_HUD_W)
 
 #define START_LIVES    3
 #define LIVES_HOLD_MS  2000

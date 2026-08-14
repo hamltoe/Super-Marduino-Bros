@@ -12,8 +12,6 @@ static void forceDeath();
 Enemy enemies[MAX_ENEMIES];
 
 uint16_t score = 0;
-uint16_t timeLeft = START_TIME;
-uint8_t timeTick = 0;
 
 int32_t spawnFrontier = 0;
 uint8_t animTick = 0;
@@ -310,8 +308,6 @@ void resetLevel() {
   cameraX = 0;
   playState = PLAY_RUN;
   deathNeedsRender = false;
-  timeLeft = START_TIME;
-  timeTick = 0;
 
   for (uint8_t i = 0; i < MAX_ENEMIES; i++) enemies[i].type = E_NONE;
   spawnFrontier = 0;
@@ -321,7 +317,7 @@ void resetLevel() {
   panelValid = false;
 }
 
-// Fatal hit / time-up: freeze, then death hop. Ignores power-up state.
+// Fatal hit: freeze, then death hop. Ignores power-up state.
 static void forceDeath() {
   if (playState != PLAY_RUN) return;
   playState = PLAY_DEATH_HOLD;
@@ -336,14 +332,6 @@ static void forceDeath() {
 // Big Mario shrinks with brief invulnerability; small Mario dies.
 static void playerHit() {
   forceDeath();
-}
-
-void tickTimer() {
-  if (++timeTick < TIME_TICKS) return;
-  timeTick = 0;
-  if (timeLeft == 0) return;
-  timeLeft--;
-  if (timeLeft == 0) forceDeath();
 }
 
 static void endDeath() {
@@ -560,10 +548,6 @@ void collideFlag() {
   int16_t py = (int16_t)(playerYq >> 8);
   if (py + playerH() <= flagTop || py >= (int16_t)flagTop + 72) return;
 
-  uint32_t bonus = (uint32_t)timeLeft * TIME_BONUS;
-  if ((uint32_t)score + bonus > 65535UL) score = 65535;
-  else score = (uint16_t)(score + bonus);
-  timeLeft = 0;
   audioStopBgm();
   audioPlay(SFX_POWERUP);
   if (levelIdx + 1 < LEVEL_COUNT) {

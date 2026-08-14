@@ -195,7 +195,6 @@ void loop() {
       collideEnemies();
       collideCoins();
       collideFlag();
-      tickTimer();
       lastStep += STEP_MS;
       steps++;
       if (playState != PLAY_RUN) break;
