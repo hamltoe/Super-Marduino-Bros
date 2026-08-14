@@ -7,9 +7,12 @@
   Notes are packed {freq/8, ms} in PROGMEM (2 bytes each).
  ****************************************************/
 #include "Audio.h"
+#include "Config.h"
 #include <avr/io.h>
 #include <avr/pgmspace.h>
 #include <avr/interrupt.h>
+
+extern uint8_t levelTheme;
 
 // D9 == PB1 == OC1A — fixed by the COM1A0 hardware path.
 #define SPEAKER_DDR   DDRB
@@ -48,7 +51,7 @@ static const Note PH_GAMEOVER[] PROGMEM = {
 // Overworld theme, 1-voice reduction of the project MIDI (120 BPM).
 // Intro + A + A + B + B + C + C' (~34 s). C' ends like the intro, so
 // the sequencer skips back to A (not the intro) on loop.
-static const Note PH_BGM[] PROGMEM = {
+static const Note PH_BGM_OVER[] PROGMEM = {
   // Intro (~2 s)
   N(659, 124), N(659, 249), N(659, 124), N(0, 126),
   N(523, 124), N(659, 124), N(0, 126), N(784, 249),
@@ -116,8 +119,79 @@ static const Note PH_BGM[] PROGMEM = {
   N(392, 249), N(0, 250),
 };
 
-// First note of A — skip the intro when the ~34 s phrase wraps.
-static const uint8_t BGM_LOOP_IDX = 11;
+// Underwater waltz, 1-voice reduction of the project MIDI (3/4, 160 BPM).
+// Intro + A + B + C (~37 s). The opening scale restarts here, so loop to 0.
+static const Note PH_BGM_WATER[] PROGMEM = {
+  // Intro — rising scale (~4.5 s)
+  N(294, 250), N(294, 62), N(0, 62), N(330, 94),
+  N(0, 250), N(0, 31), N(370, 94), N(0, 250),
+  N(0, 31), N(392, 94), N(0, 250), N(0, 31),
+  N(440, 94), N(0, 250), N(0, 31), N(466, 94),
+  N(0, 250), N(0, 31), N(494, 62), N(0, 125),
+  N(494, 62), N(0, 125), N(494, 94), N(0, 250),
+  N(0, 31), N(494, 94), N(0, 250), N(0, 31),
+  N(494, 250), N(494, 250), N(494, 156), N(0, 94),
+  N(294, 250), N(294, 62), N(0, 62),
+  // A (~8.6 s)
+  N(494, 250), N(494, 250), N(494, 250), N(494, 250),
+  N(494, 31), N(0, 94), N(466, 250), N(466, 250),
+  N(466, 250), N(466, 250), N(466, 31), N(0, 94),
+  N(494, 250), N(494, 250), N(494, 250), N(494, 250),
+  N(494, 31), N(0, 250), N(0, 31), N(294, 62),
+  N(0, 125), N(330, 62), N(0, 125), N(370, 62),
+  N(0, 125), N(392, 62), N(0, 125), N(440, 62),
+  N(0, 125), N(494, 250), N(494, 250), N(494, 250),
+  N(494, 250), N(494, 31), N(0, 94), N(466, 250),
+  N(466, 250), N(466, 250), N(523, 250), N(523, 62),
+  N(0, 62), N(494, 250), N(494, 250), N(494, 250),
+  N(494, 250), N(494, 31), N(0, 250), N(0, 250),
+  N(0, 250), N(0, 94), N(294, 94), N(0, 250),
+  N(0, 31),
+  // B (~9 s)
+  N(440, 250), N(440, 250), N(440, 250), N(440, 250),
+  N(440, 31), N(0, 94), N(415, 250), N(415, 250),
+  N(415, 250), N(415, 250), N(415, 31), N(0, 94),
+  N(440, 250), N(440, 250), N(440, 250), N(440, 250),
+  N(440, 31), N(0, 250), N(0, 31), N(277, 62),
+  N(0, 125), N(294, 62), N(0, 125), N(330, 62),
+  N(0, 125), N(370, 62), N(0, 125), N(392, 62),
+  N(0, 125), N(440, 250), N(440, 250), N(440, 250),
+  N(440, 250), N(440, 31), N(0, 94), N(294, 250),
+  N(294, 250), N(294, 250), N(523, 250), N(523, 62),
+  N(0, 62), N(494, 250), N(494, 250), N(494, 250),
+  N(494, 250), N(494, 31), N(0, 250), N(0, 250),
+  N(0, 250), N(0, 94), N(392, 94), N(0, 250),
+  N(0, 31),
+  // C (~15 s). Cadence lands on G, then the opening scale repeats.
+  N(587, 250), N(587, 250), N(587, 250), N(587, 250),
+  N(587, 31), N(0, 94), N(587, 250), N(587, 250),
+  N(587, 250), N(587, 250), N(587, 31), N(0, 94),
+  N(587, 250), N(587, 250), N(587, 250), N(587, 250),
+  N(587, 31), N(0, 94), N(587, 94), N(0, 250),
+  N(0, 31), N(659, 94), N(0, 250), N(0, 219),
+  N(587, 62), N(0, 125), N(523, 250), N(523, 250),
+  N(523, 250), N(523, 250), N(523, 31), N(0, 94),
+  N(523, 250), N(523, 250), N(523, 250), N(523, 250),
+  N(523, 31), N(0, 94), N(523, 250), N(523, 250),
+  N(523, 250), N(523, 250), N(523, 31), N(0, 94),
+  N(523, 94), N(0, 250), N(0, 31), N(587, 94),
+  N(0, 250), N(0, 219), N(523, 62), N(0, 125),
+  N(494, 250), N(494, 250), N(494, 250), N(494, 250),
+  N(494, 31), N(0, 94), N(294, 94), N(0, 250),
+  N(0, 31), N(392, 94), N(0, 250), N(0, 31),
+  N(523, 94), N(0, 250), N(0, 31), N(494, 62),
+  N(0, 125), N(494, 62), N(0, 125), N(494, 62),
+  N(0, 250), N(0, 250), N(370, 62), N(0, 125),
+  N(392, 250), N(392, 250), N(392, 250), N(392, 250),
+  N(392, 31), N(0, 94), N(392, 250), N(392, 250),
+  N(392, 156), N(0, 250), N(0, 219),
+};
+
+static const uint8_t BGM_OVER_LOOP_IDX = 11;
+
+static const Note* bgmNotes = PH_BGM_OVER;
+static uint8_t bgmLen = sizeof(PH_BGM_OVER) / sizeof(Note);
+static uint8_t bgmLoopIdx = BGM_OVER_LOOP_IDX;
 
 struct Phrase {
   const Note* notes;
@@ -194,13 +268,12 @@ static void startSfxNote(uint8_t i, uint16_t now) {
 }
 
 static void startBgmNote(uint8_t i, uint16_t now) {
-  const uint8_t len = sizeof(PH_BGM) / sizeof(Note);
-  if (i >= len) i = BGM_LOOP_IDX;
+  if (i >= bgmLen) i = bgmLoopIdx;
   bgmIdx = i;
-  bgmLenMs = noteMs(PH_BGM, i);
+  bgmLenMs = noteMs(bgmNotes, i);
   bgmStartMs = now;
   flags &= (uint8_t)~F_TAIL;
-  toneStart(noteHz(PH_BGM, i));
+  toneStart(noteHz(bgmNotes, i));
 }
 
 static void beginPhrase(const Note* notes, uint8_t len) {
@@ -221,10 +294,22 @@ static void resumeBgm(uint16_t now) {
 }
 
 // Silence the tail of a note once, when the note is long enough that a gap helps.
+// BGM skips that gap when the next event is a rest (gap is already encoded) or
+// the same pitch (a long waltz note split across uint8 durations).
+static bool bgmKeepsTone() {
+  uint8_t next = bgmIdx + 1;
+  if (next >= bgmLen) next = bgmLoopIdx;
+  uint16_t cur = noteHz(bgmNotes, bgmIdx);
+  if (cur < 16) return false;
+  uint16_t nxt = noteHz(bgmNotes, next);
+  return nxt < 16 || nxt == cur;
+}
+
 static bool maybeArticulate(uint16_t elapsed, uint16_t lenMs) {
   if (flags & F_TAIL) return true;
   if (lenMs <= (uint16_t)(ARTICULATION_MS * 2)) return false;
   if (elapsed < lenMs - ARTICULATION_MS) return false;
+  if (!(flags & F_SFX) && bgmKeepsTone()) return false;
   toneStop();
   flags |= F_TAIL;
   return true;
@@ -247,6 +332,15 @@ void audioPlay(uint8_t sfx) {
 }
 
 void audioStartBgm() {
+  if (levelTheme == TH_WATER) {
+    bgmNotes = PH_BGM_WATER;
+    bgmLen = (uint8_t)(sizeof(PH_BGM_WATER) / sizeof(Note));
+    bgmLoopIdx = 0;
+  } else {
+    bgmNotes = PH_BGM_OVER;
+    bgmLen = (uint8_t)(sizeof(PH_BGM_OVER) / sizeof(Note));
+    bgmLoopIdx = BGM_OVER_LOOP_IDX;
+  }
   flags = (uint8_t)((flags & (uint8_t)~(F_PAUSE | F_TAIL)) | F_BGM);
   bgmIdx = 0;
   bgmLenMs = 0;
@@ -296,6 +390,6 @@ void audioUpdate() {
   if ((int16_t)(elapsed - bgmLenMs) < 0) return;
 
   uint8_t next = bgmIdx + 1;
-  if (next >= (uint8_t)(sizeof(PH_BGM) / sizeof(Note))) next = BGM_LOOP_IDX;
+  if (next >= bgmLen) next = bgmLoopIdx;
   startBgmNote(next, now);
 }
