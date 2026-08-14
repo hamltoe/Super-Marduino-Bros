@@ -1,7 +1,7 @@
 /***************************************************
   Mario-style demo - SSD1351 128x128 OLED on Arduino Nano
 
-  Controls: NES Classic / clone controller over I2C
+  Controls: Controller over I2C
     VCC -> 3.3V, GND -> GND, SDA -> A4, SCL -> A5
 
   Audio: passive piezo/buzzer on D9 (Timer1 CTC), see Audio.h / Audio.cpp
@@ -38,7 +38,8 @@
   Modules (kept as .cpp/.h like Audio to stay flash-small):
     Config.h   - pins, colors, constants (header-only folds)
     Input      - NES Classic over I2C
-    World      - PROGMEM level + gone/?-block state
+    World      - level loader + gone/?-block state
+    LevelOver / Under / Mush / Water / Castle - PROGMEM courses
     Game       - player, enemies, items, physics, score
     Display    - column compositor + SSD1351 output
     UI         - title / select / lives / game-over / course clear
@@ -188,12 +189,10 @@ void loop() {
     while ((now - lastStep) >= STEP_MS && steps < 3) {
       // Re-read each step so held directions stay live across catch-up.
       updatePlayer(readController());
+      updateBeams();
       spawnEnemies();
       updateEnemies();
-      updateItems();
-      collideShellHits();
       collideEnemies();
-      collideItems();
       collideCoins();
       collideFlag();
       tickTimer();

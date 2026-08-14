@@ -1,6 +1,7 @@
 #include "UI.h"
 #include "Display.h"
 #include "Game.h"
+#include "World.h"
 #include "Input.h"
 #include "Audio.h"
 
@@ -16,6 +17,7 @@ void enterMode(uint8_t mode) {
     score = 0;
     timeLeft = START_TIME;
     timeTick = 0;
+    levelIdx = 0;
     audioStopBgm();
   }
 
@@ -103,6 +105,11 @@ static void drawSelect() {
 
 static void drawLives() {
   uiClear();
+  char world[4] = {'1', '-', (char)('1' + levelIdx), '\0'};
+  tft.setTextSize(1);
+  tft.setTextColor(WHITE);
+  tft.setCursor((SCREEN_WIDTH - 18) / 2, 14);
+  tft.print(world);
   if (playAsLuigi) uiCenter(36, F("LUIGI"), LUIGI_GRN, 2);
   else             uiCenter(36, F("MARIO"), RED, 2);
   char line[4] = {'x', ' ', (char)('0' + lives), '\0'};

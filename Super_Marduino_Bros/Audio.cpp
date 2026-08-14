@@ -1,12 +1,23 @@
 /***************************************************
-  Compact piezo sequencer — Timer1 CTC toggle on D9.
+  Compact piezo sequencer — Timer1 CTC toggle on OC1A (D9).
+
+  Hardware toggles the pin on every compare match. No Timer1 ISR,
+  no Arduino tone(), no CPU cost after the OCR1A write.
 
   Notes are packed {freq/8, ms} in PROGMEM (2 bytes each).
-  No Arduino tone() — saves ~1 KB flash on ATmega328P.
  ****************************************************/
 #include "Audio.h"
 #include <avr/io.h>
 #include <avr/pgmspace.h>
+#include <avr/interrupt.h>
+
+// D9 == PB1 == OC1A — fixed by the COM1A0 hardware path.
+#define SPEAKER_DDR   DDRB
+#define SPEAKER_PORT  PORTB
+#define SPEAKER_BIT   PB1
+
+// Brief silence at the tail of long notes so repeated pitches separate.
+static const uint8_t ARTICULATION_MS = 12;
 
 struct Note {
   uint8_t hz8;
@@ -34,10 +45,24 @@ static const Note PH_DEATH[] PROGMEM = {
 static const Note PH_GAMEOVER[] PROGMEM = {
   N(392, 100), N(330, 120), N(262, 160), N(196, 200)
 };
+// Overworld theme, 1-voice reduction of the project MIDI (120 BPM).
+// Intro + A + A (~10 s), then the sequencer loops.
 static const Note PH_BGM[] PROGMEM = {
-  N(523, 110), N(659, 110), N(784, 110), N(659, 110),
-  N(698, 110), N(880, 110), N(784, 200),
-  N(659, 110), N(523, 160), N(0, 50),
+  N(659, 124), N(659, 249), N(659, 124), N(0, 126),
+  N(523, 124), N(659, 124), N(0, 126), N(784, 249),
+  N(0, 250), N(392, 249), N(0, 250), N(523, 249),
+  N(0, 126), N(392, 249), N(0, 126), N(330, 249),
+  N(0, 126), N(440, 249), N(494, 249), N(466, 124),
+  N(440, 124), N(0, 126), N(392, 166), N(659, 166),
+  N(784, 166), N(880, 249), N(698, 124), N(784, 124),
+  N(0, 126), N(659, 249), N(523, 124), N(587, 124),
+  N(494, 124), N(0, 250), N(523, 249), N(0, 126),
+  N(392, 249), N(0, 126), N(330, 249), N(0, 126),
+  N(440, 249), N(494, 249), N(466, 124), N(440, 124),
+  N(0, 126), N(392, 166), N(659, 166), N(784, 166),
+  N(880, 249), N(698, 124), N(784, 124), N(0, 126),
+  N(659, 249), N(523, 124), N(587, 124), N(494, 124),
+  N(0, 250),
 };
 
 struct Phrase {
@@ -62,56 +87,102 @@ static const Phrase SFX_TABLE[SFX_COUNT] PROGMEM = {
 
 static const Note* curNotes;
 static uint8_t curLen, curIdx;
-static uint16_t noteUntil;
-static uint8_t flags;  // b0 sfx, b1 bgm, b2 paused
+static uint16_t noteStartMs;
+static uint16_t noteLenMs;
+static uint8_t flags;  // b0 sfx, b1 bgm, b2 paused, b3 tail silenced
 static uint8_t bgmIdx;
-static uint16_t bgmUntil;
+static uint16_t bgmStartMs;
+static uint16_t bgmLenMs;
 
 #define F_SFX   1
 #define F_BGM   2
 #define F_PAUSE 4
+#define F_TAIL  8
 
-static void hwSilence() {
-  TCCR1A = 0;
-  TCCR1B = 0;
-  digitalWrite(AUDIO_PIN, LOW);
+// Prescaler /8: OCR1A = F_CPU / (2 * 8 * hz) - 1 = 1000000 / hz - 1
+// Usable range: ~16 Hz (OCR 62499) to ~8 kHz (OCR 124).
+static void toneStop() {
+  TCCR1A = 0;                          // disconnect OC1A from the pin
+  TCCR1B = 0;                          // stop the clock
+  TIMSK1 = 0;                          // no Timer1 interrupts
+  SPEAKER_PORT &= ~_BV(SPEAKER_BIT);   // park low: no DC through the coil
 }
 
-static void hwTone(uint16_t hz) {
-  if (!hz) { hwSilence(); return; }
-  uint32_t ocr = ((F_CPU / 16UL) / (uint32_t)hz) - 1UL;
-  if (ocr > 65535UL) ocr = 65535UL;
-  OCR1A = (uint16_t)ocr;
-  TCCR1A = _BV(COM1A0);
-  TCCR1B = _BV(WGM12) | _BV(CS11);
+static void toneStart(uint16_t hz) {
+  if (hz < 16) { toneStop(); return; }
+
+  uint16_t top = (uint16_t)(1000000UL / hz) - 1;
+
+  uint8_t sreg = SREG;
+  cli();                               // 16-bit register writes must be atomic
+  OCR1A = top;
+  if (TCNT1 > top) TCNT1 = 0;          // else counter races to 0xFFFF — glitch
+  TCCR1A = _BV(COM1A0);                // toggle OC1A on compare match
+  TCCR1B = _BV(WGM12) | _BV(CS11);     // CTC (TOP = OCR1A), prescaler /8
+  TIMSK1 = 0;
+  SREG = sreg;
+}
+
+static uint16_t noteHz(const Note* notes, uint8_t i) {
+  return (uint16_t)pgm_read_byte(&notes[i].hz8) << 3;
+}
+
+static uint8_t noteMs(const Note* notes, uint8_t i) {
+  return pgm_read_byte(&notes[i].ms);
+}
+
+static void startSfxNote(uint8_t i, uint16_t now) {
+  curIdx = i;
+  noteLenMs = noteMs(curNotes, i);
+  noteStartMs = now;
+  flags &= (uint8_t)~F_TAIL;
+  toneStart(noteHz(curNotes, i));
+}
+
+static void startBgmNote(uint8_t i, uint16_t now) {
+  const uint8_t len = sizeof(PH_BGM) / sizeof(Note);
+  if (i >= len) i = 0;
+  bgmIdx = i;
+  bgmLenMs = noteMs(PH_BGM, i);
+  bgmStartMs = now;
+  flags &= (uint8_t)~F_TAIL;
+  toneStart(noteHz(PH_BGM, i));
 }
 
 static void beginPhrase(const Note* notes, uint8_t len) {
   curNotes = notes;
   curLen = len;
-  curIdx = 0;
-  flags |= F_SFX;
-  if (!len) { hwSilence(); noteUntil = 0; return; }
-  uint16_t now = (uint16_t)millis();
-  hwTone((uint16_t)pgm_read_byte(&notes[0].hz8) << 3);
-  noteUntil = now + pgm_read_byte(&notes[0].ms);
+  flags = (uint8_t)((flags | F_SFX) & (uint8_t)~F_TAIL);
+  if (!len) {
+    toneStop();
+    noteLenMs = 0;
+    return;
+  }
+  startSfxNote(0, (uint16_t)millis());
 }
 
 static void resumeBgm(uint16_t now) {
-  if (!(flags & F_BGM) || (flags & F_PAUSE)) { hwSilence(); return; }
-  const uint8_t len = sizeof(PH_BGM) / sizeof(Note);
-  if (bgmIdx >= len) bgmIdx = 0;
-  hwTone((uint16_t)pgm_read_byte(&PH_BGM[bgmIdx].hz8) << 3);
-  bgmUntil = now + pgm_read_byte(&PH_BGM[bgmIdx].ms);
+  if (!(flags & F_BGM) || (flags & F_PAUSE)) { toneStop(); return; }
+  startBgmNote(bgmIdx, now);
+}
+
+// Silence the tail of a note once, when the note is long enough that a gap helps.
+static bool maybeArticulate(uint16_t elapsed, uint16_t lenMs) {
+  if (flags & F_TAIL) return true;
+  if (lenMs <= (uint16_t)(ARTICULATION_MS * 2)) return false;
+  if (elapsed < lenMs - ARTICULATION_MS) return false;
+  toneStop();
+  flags |= F_TAIL;
+  return true;
 }
 
 void audioInit() {
-  pinMode(AUDIO_PIN, OUTPUT);
-  hwSilence();
+  SPEAKER_DDR |= _BV(SPEAKER_BIT);   // D9 as output — required for OC1A
+  toneStop();
   flags = 0;
   curNotes = 0;
   curLen = curIdx = bgmIdx = 0;
-  noteUntil = bgmUntil = 0;
+  noteStartMs = noteLenMs = bgmStartMs = bgmLenMs = 0;
   audioPlay(SFX_BLIP);
 }
 
@@ -123,22 +194,22 @@ void audioPlay(uint8_t sfx) {
 }
 
 void audioStartBgm() {
-  flags = (uint8_t)((flags & ~F_PAUSE) | F_BGM);
+  flags = (uint8_t)((flags & (uint8_t)~(F_PAUSE | F_TAIL)) | F_BGM);
   bgmIdx = 0;
-  bgmUntil = 0;
+  bgmLenMs = 0;
   if (!(flags & F_SFX)) resumeBgm((uint16_t)millis());
 }
 
 void audioStopBgm() {
-  flags &= (uint8_t)~(F_BGM | F_PAUSE);
+  flags &= (uint8_t)~(F_BGM | F_PAUSE | F_TAIL);
   bgmIdx = 0;
-  if (!(flags & F_SFX)) hwSilence();
+  if (!(flags & F_SFX)) toneStop();
 }
 
 void audioSetPaused(bool paused) {
   if (paused) {
     flags |= F_PAUSE;
-    if (!(flags & F_SFX)) hwSilence();
+    if (!(flags & F_SFX)) toneStop();
   } else {
     flags &= (uint8_t)~F_PAUSE;
     if ((flags & F_BGM) && !(flags & F_SFX)) resumeBgm((uint16_t)millis());
@@ -149,23 +220,29 @@ void audioUpdate() {
   uint16_t now = (uint16_t)millis();
 
   if (flags & F_SFX) {
-    if ((int16_t)(now - noteUntil) < 0) return;
+    uint16_t elapsed = now - noteStartMs;
+    maybeArticulate(elapsed, noteLenMs);
+    if ((int16_t)(elapsed - noteLenMs) < 0) return;
+
     if (++curIdx >= curLen) {
-      flags &= (uint8_t)~F_SFX;
+      flags &= (uint8_t)~(F_SFX | F_TAIL);
       curNotes = 0;
       curLen = 0;
       if ((flags & F_BGM) && !(flags & F_PAUSE)) resumeBgm(now);
-      else hwSilence();
+      else toneStop();
       return;
     }
-    hwTone((uint16_t)pgm_read_byte(&curNotes[curIdx].hz8) << 3);
-    noteUntil = now + pgm_read_byte(&curNotes[curIdx].ms);
+    startSfxNote(curIdx, now);
     return;
   }
 
   if (!(flags & F_BGM) || (flags & F_PAUSE)) return;
-  if ((int16_t)(now - bgmUntil) < 0) return;
-  if (++bgmIdx >= (uint8_t)(sizeof(PH_BGM) / sizeof(Note))) bgmIdx = 0;
-  hwTone((uint16_t)pgm_read_byte(&PH_BGM[bgmIdx].hz8) << 3);
-  bgmUntil = now + pgm_read_byte(&PH_BGM[bgmIdx].ms);
+
+  uint16_t elapsed = now - bgmStartMs;
+  maybeArticulate(elapsed, bgmLenMs);
+  if ((int16_t)(elapsed - bgmLenMs) < 0) return;
+
+  uint8_t next = bgmIdx + 1;
+  if (next >= (uint8_t)(sizeof(PH_BGM) / sizeof(Note))) next = 0;
+  startBgmNote(next, now);
 }

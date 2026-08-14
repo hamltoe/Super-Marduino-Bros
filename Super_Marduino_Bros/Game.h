@@ -5,7 +5,6 @@
 #include "Input.h"
 
 extern Enemy enemies[];
-extern Item items[];
 
 extern uint16_t score;
 extern uint16_t timeLeft;
@@ -15,15 +14,12 @@ extern int32_t spawnFrontier;
 extern uint8_t animTick;
 extern uint8_t enemyFrame;
 
-extern bool bigMario;
-extern uint8_t invulnTicks;
-
 inline int16_t playerH() {
-  return bigMario ? PLAYER_H_BIG : PLAYER_H_SMALL;
+  return PLAYER_H_SMALL;
 }
 
 inline int32_t playerHQ() {
-  return (int32_t)playerH() << 8;
+  return (int32_t)PLAYER_H_SMALL << 8;
 }
 
 extern int32_t playerXq;
@@ -69,12 +65,10 @@ int16_t enemyMaxHeight(const Enemy& e);
 void resetLevel();
 void updatePlayer(const Buttons& btn);
 void updateDeathFall();
+void updateBeams();
 void spawnEnemies();
 void updateEnemies();
-void collideShellHits();
 void collideEnemies();
-void updateItems();
-void collideItems();
 void collideCoins();
 void collideFlag();
 void tickTimer();

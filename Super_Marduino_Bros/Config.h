@@ -63,12 +63,16 @@
 #define SHELL_RIM  0xFF14
 #define LUIGI_GRN  0x07C0
 #define UI_DIM     0x8410
+#define BRICK_BLUE    0x3B5F
+#define BRICK_BLUE_DK 0x2214
+#define UNDER_FLOOR   0x2126
+#define WATER_SKY     0x0231
+#define WATER_SAND    0xC4E6
+#define CASTLE_BRICK  0x6B4D
+#define CASTLE_BRICK_DK 0x4208
 
 #define GROUND_Y       104
-// Finite World 1-1: one section spans the whole course (no wrap).
-#define LEVEL_W        1200
-#define SECTION_W      LEVEL_W
-#define FLAG_X         1110
+#define LAVA_Y         118
 #define PLAYER_W       14
 #define PLAYER_H_SMALL 14
 #define PLAYER_H_BIG   22
@@ -102,10 +106,29 @@
 #define O_COIN   5
 #define O_PIPE   6
 #define O_FLAG   7
+#define O_PLAT   8
 
 #define E_NONE   0
 #define E_GOOMBA 1
 #define E_KOOPA  2
+#define E_FISH   3
+#define E_BOWSER 4
+
+#define TH_OVER   0
+#define TH_UNDER  1
+#define TH_MUSH   2
+#define TH_WATER  3
+#define TH_CASTLE 4
+
+#define LF_PITS  0x01
+#define LF_SWIM  0x02
+#define LF_LAVA  0x04
+
+#define LEVEL_COUNT 5
+#define MAX_BEAMS   2
+#define PLAT_W      40
+#define PLAT_H      8
+#define BEAM_H      4
 
 #define ES_WALK   0
 #define ES_SQUASH 1  // flattened Goomba, waits out a timer
@@ -122,11 +145,23 @@
 #define SHELL_H  12
 #define SQUASH_H 6
 
+#define FISH_W    14
+#define FISH_H    10
+#define BOWSER_W  20
+#define BOWSER_H  22
+#define BOWSER_HP 3
+
 #define GOOMBA_SPEED_Q VEL_Q(19)
 #define KOOPA_SPEED_Q  VEL_Q(16)
 #define SHELL_SPEED_Q  VEL_Q(75)
+#define FISH_SPEED_Q   VEL_Q(22)
+#define BOWSER_SPEED_Q VEL_Q(12)
 #define SQUASH_TICKS   (640 / STEP_MS)  // ~0.64 s flattened
 #define ANIM_TICKS     (130 / STEP_MS)  // ~0.13 s per walk frame
+
+#define SWIM_GRAVITY_Q  ACC_Q(48)
+#define SWIM_UP_Q       (-VEL_Q(58))
+#define SWIM_MAX_FALL_Q VEL_Q(48)
 
 #define IT_NONE     0
 #define IT_MUSHROOM 1
@@ -185,7 +220,38 @@ struct ObjDef {
 
 struct EnemyDef {
   int16_t x;
+  uint8_t y;     // 0 = stand on GROUND_Y; fish/fire use top Y
   uint8_t type;
+};
+
+struct BeamDef {
+  int16_t x0;
+  int16_t x1;
+  uint8_t y;
+  uint8_t w;
+};
+
+struct Beam {
+  int16_t x;
+  int16_t prevX;
+  int16_t xMin;
+  int16_t xMax;
+  uint8_t y;
+  uint8_t w;
+  int8_t vx;
+};
+
+struct LevelDef {
+  const ObjDef* objs;
+  const EnemyDef* spawns;
+  const BeamDef* beams;
+  int16_t width;
+  uint8_t objCount;
+  uint8_t spawnCount;
+  uint8_t beamCount;
+  uint8_t spawnY;
+  uint8_t theme;
+  uint8_t flags;
 };
 
 struct Enemy {

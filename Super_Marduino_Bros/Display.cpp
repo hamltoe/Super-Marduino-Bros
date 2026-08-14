@@ -22,19 +22,12 @@ static int32_t marioColPrev = 0;
 static int16_t marioRowPrev = 0;
 
 // Disc half-widths: circTab[r][d] = floor(sqrt(r^2 - d^2)). Flash, not SRAM.
-static const uint8_t circTab[12][12] PROGMEM = {
-  { 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0},
-  { 1,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0},
-  { 2,  1,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0},
-  { 3,  2,  2,  0,  0,  0,  0,  0,  0,  0,  0,  0},
-  { 4,  3,  3,  2,  0,  0,  0,  0,  0,  0,  0,  0},
-  { 5,  4,  4,  4,  3,  0,  0,  0,  0,  0,  0,  0},
-  { 6,  5,  5,  5,  4,  3,  0,  0,  0,  0,  0,  0},
-  { 7,  6,  6,  6,  5,  4,  3,  0,  0,  0,  0,  0},
-  { 8,  7,  7,  7,  6,  6,  5,  3,  0,  0,  0,  0},
-  { 9,  8,  8,  8,  8,  7,  6,  5,  4,  0,  0,  0},
-  {10,  9,  9,  9,  9,  8,  8,  7,  6,  4,  0,  0},
-  {11, 10, 10, 10, 10,  9,  9,  8,  7,  6,  4,  0},
+static const uint8_t circTab[5][5] PROGMEM = {
+  { 0,  0,  0,  0,  0},
+  { 1,  0,  0,  0,  0},
+  { 2,  1,  0,  0,  0},
+  { 3,  2,  2,  0,  0},
+  { 4,  3,  3,  2,  0},
 };
 
 static void vspan(uint16_t* b, int16_t y0, int16_t y1, uint16_t c) {
@@ -53,73 +46,68 @@ static void colDisc(uint16_t* b, int16_t du, uint8_t r, int16_t cy, uint16_t col
 }
 
 static void colCloud(uint16_t* b, int16_t u, int16_t cy) {
-  colDisc(b, u - 6, 5, cy + 5, WHITE);
-  colDisc(b, u - 13, 7, cy + 2, WHITE);
-  colDisc(b, u - 21, 5, cy + 5, WHITE);
-  if (u >= 6 && u <= 21) vspan(b, cy + 5, cy + 10, WHITE);
+  colDisc(b, u - 6, 4, cy + 5, WHITE);
+  colDisc(b, u - 13, 4, cy + 2, WHITE);
+  colDisc(b, u - 21, 4, cy + 5, WHITE);
 }
 
-// Apex at the top, base on the ground: the span starts T rows below
-// the apex, where T is the first row wide enough to reach this column.
 static void colHill(uint16_t* b, int16_t u, uint16_t color) {
   int16_t du = u - 25;
   if (du < 0) du = -du;
   int16_t t = (du * 6 + 4) / 5;
   if (t <= 30) vspan(b, GROUND_Y - 30 + t, GROUND_Y - 1, color);
-  colDisc(b, du, 11, GROUND_Y - 19, color);
 }
 
 static void colBlock(uint16_t* b, int16_t u, int16_t by, bool question) {
+  uint16_t fill = question ? YELLOW : palBrick;
+  uint16_t edge = palBrickDk;
   if (u == 0 || u == 14) {
-    vspan(b, by, by + 14, DARK_DIRT);
+    vspan(b, by, by + 14, edge);
     return;
   }
 
-  vspan(b, by, by + 14, question ? YELLOW : ORANGE);
-  vspan(b, by, by, DARK_DIRT);
-  vspan(b, by + 14, by + 14, DARK_DIRT);
+  vspan(b, by, by + 14, fill);
+  vspan(b, by, by, edge);
+  vspan(b, by + 14, by + 14, edge);
   if (u >= 2 && u <= 12) vspan(b, by + 2, by + 2, WHITE);
 
   if (question) {
-    if (u >= 5 && u <= 9) vspan(b, by + 4, by + 5, DARK_DIRT);
-    if (u >= 8 && u <= 9) vspan(b, by + 6, by + 8, DARK_DIRT);
+    if (u >= 5 && u <= 9) vspan(b, by + 4, by + 5, edge);
+    if (u >= 8 && u <= 9) vspan(b, by + 6, by + 8, edge);
     if (u >= 6 && u <= 7) {
-      vspan(b, by + 9, by + 10, DARK_DIRT);
-      vspan(b, by + 12, by + 13, DARK_DIRT);
+      vspan(b, by + 9, by + 10, edge);
+      vspan(b, by + 12, by + 13, edge);
     }
   } else {
-    if (u == 7) vspan(b, by, by + 4, DARK_DIRT);
-    if (u == 4) vspan(b, by + 9, by + 14, DARK_DIRT);
-    vspan(b, by + 7, by + 7, DARK_DIRT);
+    if (u == 7) vspan(b, by, by + 4, edge);
+    if (u == 4) vspan(b, by + 9, by + 14, edge);
+    vspan(b, by + 7, by + 7, edge);
   }
 }
 
-static void colPipe(uint16_t* b, int16_t u) {
-  const int16_t top = GROUND_Y - 34;
-  const int16_t capBot = GROUND_Y - 27;
-
-  vspan(b, top, capBot, GREEN);
-  if (u == 0 || u == 23) {
-    vspan(b, top, capBot, DARK_DIRT);
-  } else {
-    vspan(b, top, top, DARK_DIRT);
-    vspan(b, capBot, capBot, DARK_DIRT);
-  }
-
-  if (u >= 3 && u <= 20) {
-    vspan(b, GROUND_Y - 26, GROUND_Y - 1, u == 20 ? DARK_DIRT : GREEN);
-  }
-  if (u == 6) vspan(b, GROUND_Y - 31, GROUND_Y - 1, PIPE_HI);
-}
-
-// Goal pole + red flag cloth to the right of the shaft.
 static void colFlag(uint16_t* b, int16_t u, int16_t top) {
-  if (u <= 2) vspan(b, top + 4, GROUND_Y - 1, u == 1 ? GREEN : WHITE);
+  if (u <= 2) vspan(b, top + 4, top + 71, u == 1 ? GREEN : WHITE);
   if (u <= 2) colDisc(b, u - 1, 2, top + 2, WHITE);
   if (u >= 3 && u <= 12) {
     int16_t drop = (int16_t)(u - 3);
     vspan(b, top + 6 + drop, top + 18 - drop, RED);
   }
+}
+
+static void colAxe(uint16_t* b, int16_t u, int16_t top) {
+  if (u == 4 || u == 5) vspan(b, top + 4, top + 14, DARK_DIRT);
+  if (u <= 9) vspan(b, top, top + 4, palBrick);
+}
+
+static void colPlat(uint16_t* b, int16_t u, int16_t by) {
+  uint16_t fill = (levelTheme == TH_MUSH) ? RED : palBrick;
+  vspan(b, by, by + 7, fill);
+  if (u == 0 || u == 39) vspan(b, by, by + 7, WHITE);
+}
+
+static void colBeam(uint16_t* b, int16_t u, int16_t by, uint8_t w) {
+  vspan(b, by, by + BEAM_H - 1, ORANGE);
+  if (u == 0 || u == (int16_t)(w - 1)) vspan(b, by, by + BEAM_H - 1, WHITE);
 }
 
 static void colCoin(uint16_t* b, int16_t u, int16_t cy) {
@@ -174,40 +162,49 @@ static void composeHud(uint16_t* b, int32_t worldX) {
 }
 
 static void composeColumn(int32_t worldX, uint16_t* b) {
-  vspan(b, 0, GROUND_Y - 1, SKY_BLUE);
-  vspan(b, GROUND_Y, GROUND_Y + 3, GRASS);
-  if ((worldX & 15) == 0) {
-    vspan(b, GROUND_Y + 4, SCREEN_HEIGHT - 1, DARK_DIRT);
+  if (levelFlags & LF_PITS) {
+    vspan(b, 0, SCREEN_HEIGHT - 1, palSky);
+    if (levelFlags & LF_LAVA) {
+      vspan(b, LAVA_Y, SCREEN_HEIGHT - 1, (worldX & 4) ? RED : ORANGE);
+    }
   } else {
-    vspan(b, GROUND_Y + 4, SCREEN_HEIGHT - 1, DIRT);
-    vspan(b, GROUND_Y + 15, GROUND_Y + 15, DARK_DIRT);
+    vspan(b, 0, GROUND_Y - 1, palSky);
+    vspan(b, GROUND_Y, GROUND_Y + 3, palGrass);
+    if ((worldX & 15) == 0) {
+      vspan(b, GROUND_Y + 4, SCREEN_HEIGHT - 1, palBrickDk);
+    } else {
+      vspan(b, GROUND_Y + 4, SCREEN_HEIGHT - 1, palDirt);
+      vspan(b, GROUND_Y + 15, GROUND_Y + 15, palBrickDk);
+    }
   }
 
   // Past the course: sky + ground only (no repeating scenery).
-  if (worldX < 0 || worldX >= LEVEL_W) {
+  if (worldX < 0 || worldX >= levelW) {
     composeHud(b, worldX);
     return;
   }
 
-  int32_t section = worldX / SECTION_W;
-  int16_t wx = (int16_t)(worldX - section * SECTION_W);
+  int16_t wx = (int16_t)worldX;
 
-  for (uint8_t i = 0; i < WORLD_COUNT; i++) {
-    uint8_t type = pgm_read_byte(&WORLD[i].type);
-    if ((type == O_BLOCK || type == O_COIN) && isBroken(section, i)) continue;
+  for (uint8_t i = 0; i < worldCount; i++) {
+    uint8_t type = pgm_read_byte(&worldObjs[i].type);
+    if ((type == O_BLOCK || type == O_COIN) && isBroken(0, i)) continue;
 
-    int16_t u = wx - (int16_t)pgm_read_word(&WORLD[i].x);
+    int16_t u = wx - (int16_t)pgm_read_word(&worldObjs[i].x);
     if (u < 0 || u >= (int16_t)objWidth(type)) continue;
 
-    int16_t oy = pgm_read_byte(&WORLD[i].y);
+    int16_t oy = pgm_read_byte(&worldObjs[i].y);
     switch (type) {
       case O_CLOUD:  colCloud(b, u, oy); break;
       case O_HILL:   colHill(b, u, HILL_GREEN); break;
       case O_HILL2:  colHill(b, u, HILL_LIGHT); break;
       case O_COIN:   colCoin(b, u, oy); break;
-      case O_PIPE:   colPipe(b, u); break;
-      case O_FLAG:   colFlag(b, u, oy); break;
-      case O_QBLOCK: colBlock(b, u, oy, !isUsedQ(section, i)); break;
+      case O_PLAT:   colPlat(b, u, oy); break;
+      case O_FLAG:
+        if (levelTheme == TH_CASTLE) colAxe(b, u, oy);
+        else colFlag(b, u, oy);
+        break;
+      case O_QBLOCK: colBlock(b, u, oy, !isUsedQ(0, i)); break;
       default:       colBlock(b, u, oy, false); break;
     }
   }
@@ -243,20 +240,25 @@ static void colSquashed(uint16_t* b, int16_t u, int16_t top) {
   spritePart(b, u, top, 0, 4, 14, 2, GOOMBA_W, false, GOOMBA_FT);
 }
 
-static void colShellBody(uint16_t* b, int16_t u, int16_t top) {
-  spritePart(b, u, top, 0, 0, 13, 9, KOOPA_W, false, SHELL_GRN);
-  spritePart(b, u, top, 2, 2, 9, 5, KOOPA_W, false, SHELL_LT);
-  spritePart(b, u, top, 0, 9, 13, 3, KOOPA_W, false, SHELL_RIM);
+static void colFish(uint16_t* b, int16_t u, int16_t top) {
+  spritePart(b, u, top, 2, 1, 10, 8, FISH_W, false, RED);
+  spritePart(b, u, top, 0, 3, 3, 4, FISH_W, false, ORANGE);
 }
 
-static void colKoopa(uint16_t* b, int16_t u, int16_t top, uint8_t frame, bool flip) {
-  spritePart(b, u, top, 3, 0, 7, 7, KOOPA_W, flip, KOOPA_SKIN);
-  spritePart(b, u, top, 6, 1, 3, 3, KOOPA_W, flip, WHITE);
-  spritePart(b, u, top, 7, 2, 1, 2, KOOPA_W, flip, BLACK);
-  colShellBody(b, u, top + 7);
-  int16_t fx = frame ? 1 : 0;
-  spritePart(b, u, top, fx, 18, 5, 2, KOOPA_W, flip, KOOPA_SKIN);
-  spritePart(b, u, top, 8 - fx, 18, 5, 2, KOOPA_W, flip, KOOPA_SKIN);
+static void colBowser(uint16_t* b, int16_t u, int16_t top, bool flip) {
+  spritePart(b, u, top, 4, 0, 12, 8, BOWSER_W, flip, KOOPA_SKIN);
+  spritePart(b, u, top, 2, 8, 16, 10, BOWSER_W, flip, GREEN);
+  spritePart(b, u, top, 6, 10, 8, 4, BOWSER_W, flip, ORANGE);
+  spritePart(b, u, top, 2, 18, 6, 4, BOWSER_W, flip, KOOPA_SKIN);
+  spritePart(b, u, top, 12, 18, 6, 4, BOWSER_W, flip, KOOPA_SKIN);
+}
+
+static void composeBeams(uint16_t* b, int32_t worldX) {
+  for (uint8_t i = 0; i < beamCount; i++) {
+    Beam& beam = beams[i];
+    if (worldX < beam.x || worldX >= beam.x + beam.w) continue;
+    colBeam(b, (int16_t)(worldX - beam.x), beam.y, beam.w);
+  }
 }
 
 static void composeEnemies(uint16_t* b, int32_t worldX) {
@@ -275,10 +277,10 @@ static void composeEnemies(uint16_t* b, int32_t worldX) {
     if (e.type == E_GOOMBA) {
       if (e.state == ES_SQUASH) colSquashed(b, u, top);
       else                      colGoomba(b, u, top, frame);
-    } else if (e.state == ES_WALK) {
-      colKoopa(b, u, top, frame, e.vxq < 0);
-    } else {
-      colShellBody(b, u, top);
+    } else if (e.type == E_FISH) {
+      colFish(b, u, top);
+    } else if (e.type == E_BOWSER) {
+      colBowser(b, u, top, e.vxq < 0);
     }
   }
 }
@@ -290,67 +292,34 @@ static void runnerPart(uint16_t* b, int16_t lu, int16_t py, int16_t lx, int16_t 
   spritePart(b, lu, py, lx, ly, w, h, PLAYER_W, !facingRight, color);
 }
 
-static void colMushroom(uint16_t* b, int16_t u, int16_t top) {
-  spritePart(b, u, top, 0, 0, 14, 7, MUSH_W, false, RED);
-  spritePart(b, u, top, 3, 2, 2, 2, MUSH_W, false, WHITE);
-  spritePart(b, u, top, 9, 3, 2, 2, MUSH_W, false, WHITE);
-  spritePart(b, u, top, 4, 7, 6, 5, MUSH_W, false, SKIN);
-  spritePart(b, u, top, 2, 12, 4, 2, MUSH_W, false, SKIN);
-  spritePart(b, u, top, 8, 12, 4, 2, MUSH_W, false, SKIN);
-}
-
-static void composeItems(uint16_t* b, int32_t worldX) {
-  for (uint8_t i = 0; i < MAX_ITEMS; i++) {
-    Item& it = items[i];
-    if (it.type == IT_NONE || it.state == IS_GONE) continue;
-
-    int32_t left = it.xq >> 8;
-    if (worldX < left || worldX >= left + MUSH_W) continue;
-
-    colMushroom(b, (int16_t)(worldX - left), (int16_t)(it.yq >> 8));
-  }
-}
-
 static void composeRunner(uint16_t* b, int32_t worldX) {
   int32_t left = playerXq >> 8;
   if (worldX < left || worldX >= left + PLAYER_W) return;
 
   int16_t py = (int16_t)(playerYq >> 8);
-  int16_t ph = playerH();
-  // Off-screen during the death fall: skip draws (dirty rect still erases).
+  int16_t ph = PLAYER_H_SMALL;
   if (py >= SCREEN_HEIGHT || py + ph <= 0) return;
 
   int16_t lu = (int16_t)(worldX - left);
   uint16_t accent = playAsLuigi ? LUIGI_GRN : RED;
-  // Big Mario is small Mario stretched ~1.5x in Y (integer parts below).
-  const bool big = bigMario;
-  const int16_t hatH = big ? 3 : 2;
-  const int16_t faceY = big ? 6 : 4;
-  const int16_t faceH = big ? 5 : 4;
-  const int16_t bodyY = big ? 11 : 8;
-  const int16_t bodyH = big ? 7 : 3;
-  const int16_t armY = big ? 12 : 8;
-  const int16_t armH = big ? 5 : 3;
-  const int16_t legY = big ? 18 : 11;
-  const int16_t legH = big ? 4 : 3;
 
-  runnerPart(b, lu, py, 3, 0, 8, hatH, accent);
-  runnerPart(b, lu, py, 1, hatH, 12, hatH, accent);
-  runnerPart(b, lu, py, 4, faceY, 7, faceH, SKIN);
-  runnerPart(b, lu, py, 9, faceY + 1, 2, 2, DARK_DIRT);
-  runnerPart(b, lu, py, 2, bodyY, 10, bodyH, BLUE);
-  runnerPart(b, lu, py, 0, armY, 3, armH, accent);
-  runnerPart(b, lu, py, 11, armY, 3, armH, accent);
+  runnerPart(b, lu, py, 3, 0, 8, 2, accent);
+  runnerPart(b, lu, py, 1, 2, 12, 2, accent);
+  runnerPart(b, lu, py, 4, 4, 7, 4, SKIN);
+  runnerPart(b, lu, py, 9, 5, 2, 2, DARK_DIRT);
+  runnerPart(b, lu, py, 2, 8, 10, 3, BLUE);
+  runnerPart(b, lu, py, 0, 8, 3, 3, accent);
+  runnerPart(b, lu, py, 11, 8, 3, 3, accent);
 
   if (!onGround || playState == PLAY_DEATH_FALL) {
-    runnerPart(b, lu, py, 1, legY, 4, legH, DARK_DIRT);
-    runnerPart(b, lu, py, 9, legY, 4, legH, DARK_DIRT);
+    runnerPart(b, lu, py, 1, 11, 4, 3, DARK_DIRT);
+    runnerPart(b, lu, py, 9, 11, 4, 3, DARK_DIRT);
   } else if (animFrame == 0) {
-    runnerPart(b, lu, py, 2, legY, 4, legH, DARK_DIRT);
-    runnerPart(b, lu, py, 9, legY, 5, legH - 1, DARK_DIRT);
+    runnerPart(b, lu, py, 2, 11, 4, 3, DARK_DIRT);
+    runnerPart(b, lu, py, 9, 11, 5, 2, DARK_DIRT);
   } else {
-    runnerPart(b, lu, py, 0, legY, 5, legH - 1, DARK_DIRT);
-    runnerPart(b, lu, py, 9, legY, 4, legH, DARK_DIRT);
+    runnerPart(b, lu, py, 0, 11, 5, 2, DARK_DIRT);
+    runnerPart(b, lu, py, 9, 11, 4, 3, DARK_DIRT);
   }
 }
 
@@ -368,8 +337,8 @@ static void paintColumn(int32_t worldX, int16_t y0, int16_t y1) {
   clipTop = y0;
   clipBot = y1;
   composeColumn(worldX, colBuf);
+  composeBeams(colBuf, worldX);
   composeEnemies(colBuf, worldX);
-  composeItems(colBuf, worldX);
   composeRunner(colBuf, worldX);
   pushColumn(worldX, y0, y1);
 }
@@ -416,7 +385,7 @@ static void paintEnemyRects(int32_t cam) {
 
     // Parked shell / flattened Goomba: pixels already correct if still.
     if (!gone && cx == e.prevX && cy == e.prevY &&
-        (e.state == ES_SHELL || e.state == ES_SQUASH)) {
+        (e.state == ES_SQUASH)) {
       continue;
     }
 
@@ -440,29 +409,18 @@ static void syncEnemyRects() {
   }
 }
 
-static void paintItemRects(int32_t cam) {
-  for (uint8_t i = 0; i < MAX_ITEMS; i++) {
-    Item& it = items[i];
-    if (it.type == IT_NONE) continue;
-
-    if (paintActorRect(cam, it.prevX, it.prevY,
-                       it.xq >> 8, (int16_t)(it.yq >> 8),
-                       MUSH_W, MUSH_H, it.state == IS_GONE)) {
-      it.type = IT_NONE;
+static void paintBeamRects(int32_t cam) {
+  for (uint8_t i = 0; i < beamCount; i++) {
+    Beam& b = beams[i];
+    int32_t x0 = (b.prevX < b.x) ? b.prevX : b.x;
+    int32_t x1 = ((b.prevX > b.x) ? b.prevX : b.x) + b.w - 1;
+    int16_t y0 = b.y;
+    int16_t y1 = (int16_t)(b.y + BEAM_H - 1);
+    for (int32_t wx = x0; wx <= x1; wx++) {
+      if (wx < cam || wx > cam + SCREEN_WIDTH - 1) continue;
+      paintColumn(wx, y0, y1);
     }
-  }
-}
-
-static void syncItemRects() {
-  for (uint8_t i = 0; i < MAX_ITEMS; i++) {
-    Item& it = items[i];
-    if (it.type == IT_NONE) continue;
-    if (it.state == IS_GONE) {
-      it.type = IT_NONE;
-      continue;
-    }
-    it.prevX = it.xq >> 8;
-    it.prevY = (int16_t)(it.yq >> 8);
+    b.prevX = b.x;
   }
 }
 
@@ -481,7 +439,7 @@ void render() {
     panelValid = true;
     pendingEraseCount = 0;
     syncEnemyRects();
-    syncItemRects();
+    for (uint8_t i = 0; i < beamCount; i++) beams[i].prevX = beams[i].x;
   } else {
     tft.startWrite();
 
@@ -502,7 +460,7 @@ void render() {
     int32_t c0 = min(marioColPrev, marioCol);
     int32_t c1 = max(marioColPrev, marioCol) + PLAYER_W - 1;
     int16_t y0 = min(marioRowPrev, marioRow);
-    int16_t y1 = max(marioRowPrev, marioRow) + PLAYER_H_BIG - 1;
+    int16_t y1 = max(marioRowPrev, marioRow) + PLAYER_H_SMALL - 1;
     if (y0 < 0) y0 = 0;
     if (y1 > SCREEN_HEIGHT - 1) y1 = SCREEN_HEIGHT - 1;
 
@@ -526,7 +484,7 @@ void render() {
     pendingEraseCount = 0;
 
     paintEnemyRects(cam);
-    paintItemRects(cam);
+    paintBeamRects(cam);
 
     // Screen-fixed HUD: repaint the union of last and current strips so
     // columns that scrolled out of the band are rewritten as plain sky
